@@ -4154,7 +4154,7 @@ void Buf_fetch<T>::mtr_add_page(buf_block_t *block) {
       fix_type = MTR_MEMO_PAGE_X_FIX;
       break;
   }
-
+  // 将控制块以及加锁方式存入事务
   mtr_memo_push(m_mtr, block, fix_type);
 }
 
@@ -4391,7 +4391,7 @@ buf_block_t *Buf_fetch<T>::single_page() {
 
   /* We have to wait here because the IO_READ state was set under the protection
   of the hash_lock and not the block->mutex and block->lock. */
-  // 这里表面读取是悲观的，需要确保 page 被读取出来，
+  // 代码运行到这里，表示这次读取是悲观的，需要确保 page 被读取出来，
   // 如果 block 没有在 buffer pool 中，会阻塞等待读取
   buf_wait_for_read(block);
 
@@ -4406,6 +4406,7 @@ buf_block_t *Buf_fetch<T>::single_page() {
     block->made_dirty_with_no_latch = m_dirty_with_no_latch;
   }
 
+  // 在这里将需要加的锁与事务联系在一起，根据锁的类型对内存页进行固定，防止 flush
   mtr_add_page(block);
 
   if (m_mode != Page_fetch::PEEK_IF_IN_POOL &&

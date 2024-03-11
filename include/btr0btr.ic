@@ -43,6 +43,7 @@ static inline buf_block_t *btr_block_get_func(
     ut::Location location, IF_DEBUG(const dict_index_t *index, ) mtr_t *mtr) {
   buf_block_t *block;
 
+  // 从缓冲池中拿出 block，这里已经完成了加锁
   block = buf_page_get_gen(page_id, page_size, mode, nullptr,
                            Page_fetch::NORMAL, location, mtr);
 

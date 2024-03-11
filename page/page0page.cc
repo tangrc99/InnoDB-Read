@@ -316,6 +316,8 @@ page_t *page_create_low(buf_block_t *block, ulint comp, page_type_t page_type) {
 
   buf_block_modify_clock_inc(block);
 
+  // 这里 create 指的是对 page 头信息进行初始化
+  // 创建 page 的内存空间是由buffer pool 负责的
   page = buf_block_get_frame(block);
 
   ut_ad(page_type == FIL_PAGE_INDEX || page_type == FIL_PAGE_RTREE ||

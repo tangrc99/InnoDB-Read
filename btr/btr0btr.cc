@@ -173,6 +173,7 @@ buf_block_t *btr_root_block_get(
   buf_block_t *block =
       btr_block_get(page_id, page_size, mode, UT_LOCATION_HERE, index, mtr);
 
+  // 对页面进行检查
   btr_assert_not_corrupted(block, index);
 #ifdef UNIV_BTR_DEBUG
   if (!dict_index_is_ibuf(index)) {
@@ -218,6 +219,7 @@ ulint btr_height_get(dict_index_t *index, /*!< in: index tree */
   /* S latches the page */
   root_block = btr_root_block_get(index, RW_S_LATCH, mtr);
 
+  /// 直接从 page 头里面读取出来 height
   height = btr_page_get_level(buf_block_get_frame(root_block));
 
   /* Release the S latch on the root page. */
@@ -348,8 +350,10 @@ void btr_page_create(
   }
 
   if (page_zip) {
+    // 直接创建新格式的 btree
     page_create_zip(block, index, level, 0, mtr, page_create_type);
   } else {
+    // 根据 index 信息，决定 btree 的格式
     page_create(block, mtr, dict_table_is_comp(index->table), page_create_type);
     /* Set the level of the new index page */
     btr_page_set_level(page, nullptr, level, mtr);

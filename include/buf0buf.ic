@@ -615,7 +615,7 @@ static inline buf_frame_t *buf_block_get_frame(
     const buf_block_t *block) /*!< in: pointer to the control block */
 {
   ut_ad(block);
-
+  // 这个函数就是简单对 block state 进行检查
   switch (buf_block_get_state(block)) {
     case BUF_BLOCK_POOL_WATCH:
     case BUF_BLOCK_ZIP_PAGE:

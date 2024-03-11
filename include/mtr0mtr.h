@@ -174,6 +174,7 @@ inline std::ostream &operator<<(std::ostream &out, const mtr_memo_slot_t &obj) {
 
 /** Mini-transaction handle and buffer */
 struct mtr_t {
+
   /** State variables of the mtr */
   struct Impl {
     /** memo stack for locks etc. */
