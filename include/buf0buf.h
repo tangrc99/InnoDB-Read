@@ -2496,7 +2496,7 @@ struct buf_pool_t {
   /** Sentinel records for buffer pool watches. Scanning the array is protected
   by taking all page_hash latches in X. Updating or reading an individual
   watch page is protected by a corresponding individual page_hash latch. */
-  buf_page_t *watch;
+  buf_page_t *watch;  // 这个是用于追踪页面是否被 purge 线程成功读取的数组
 
   /** A wrapper for buf_pool_t::allocator.alocate_large which also advices the
   OS that this chunk should not be dumped to a core file if that was requested.

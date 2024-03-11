@@ -2927,6 +2927,9 @@ bool buf_pool_watch_is_sentinel(const buf_pool_t *buf_pool,
   ut_ad(buf_page_hash_lock_held_s_or_x(buf_pool, bpage));
   ut_ad(buf_page_in_file(bpage));
 
+  // 由于 watch 数组中的 page 在分配时，地址是升序，通过判断地址可以知道 page
+  // 是否是一个 watch page. 这里采取这个判断是因为 watch page 在被使用时state 会被
+  // 修改为 zip，不能用 state 来判断。
   if (bpage < &buf_pool->watch[0] ||
       bpage >= &buf_pool->watch[BUF_POOL_WATCH_SIZE]) {
     ut_ad(buf_page_get_state(bpage) != BUF_BLOCK_ZIP_PAGE ||
@@ -2980,6 +2983,7 @@ static buf_page_t *buf_pool_watch_set(const page_id_t &page_id,
   as this function will be called only by the purge thread. */
 
   /* To obey latching order first release the hash_lock. */
+  // 后面需要对所有 hash 加x锁，这里先释放该锁
   rw_lock_x_unlock(*hash_lock);
 
   mutex_enter(&buf_pool->LRU_list_mutex);
@@ -2993,7 +2997,7 @@ static buf_page_t *buf_pool_watch_set(const page_id_t &page_id,
   purge thread. This is because of the small
   time window between when we release the
   hash_lock to lock all the hash_locks. */
-
+  // 前面的检查并没有进入临界区，所以需要二次检查
   bpage = buf_page_hash_get_low(buf_pool, page_id);
   if (bpage) {
     mutex_exit(&buf_pool->LRU_list_mutex);
@@ -3015,6 +3019,8 @@ static buf_page_t *buf_pool_watch_set(const page_id_t &page_id,
 
     switch (bpage->state) {
       case BUF_BLOCK_POOL_WATCH:
+        // 进入该分支后，成功找到一个空白的 watcher，将其修改为 BUF_BLOCK_ZIP_PAGE
+        // 使用这个标识位是因为 zip 并没有被分配在 chunk 里面，watch 同样也是
         ut_ad(!bpage->in_page_hash);
         ut_ad(bpage->buf_fix_count == 0);
 
@@ -3117,6 +3123,7 @@ bool buf_pool_watch_occurred(const page_id_t &page_id) {
   increments buf_fix_count. */
   bpage = buf_page_hash_get_low(buf_pool, page_id);
 
+  // 完成读取后，purge线程会取消 watch
   auto ret = !buf_pool_watch_is_sentinel(buf_pool, bpage);
   rw_lock_s_unlock(hash_lock);
 
@@ -3665,7 +3672,7 @@ dberr_t Buf_fetch_normal::get(buf_block_t *&block) noexcept {
 
     ut_ad(
         !rw_lock_own(buf_page_hash_lock_get(m_buf_pool, m_page_id), RW_LOCK_S));
-
+    /// 判断之前的缓存是否已经失效了
     block = lookup();
 
     if (block != nullptr) {
@@ -3680,7 +3687,7 @@ dberr_t Buf_fetch_normal::get(buf_block_t *&block) noexcept {
          until it's gone - it should disappear eventually when the IO ends. */
         continue;
       }
-
+      // 通过计数器继续保持缓存
       buf_block_fix(block);
 
       /* Now safe to release page_hash S lock. */
@@ -3746,11 +3753,11 @@ dberr_t Buf_fetch_other::get(buf_block_t *&block) noexcept {
     if (m_mode == Page_fetch::IF_IN_POOL_OR_WATCH) {
       block = is_on_watch();
     }
-
+    // 已经成功找到 block 或者已经成功设置 watch
     if (block != nullptr) {
       break;
     }
-
+    // 未找到且未设置 watch
     if (is_optimistic() || m_mode == Page_fetch::IF_IN_POOL_OR_WATCH) {
       /* If it was an optimistic request, return the page only if it was
       found in the buffer pool and we haven't been able to find it then
@@ -3787,6 +3794,9 @@ buf_block_t *Buf_fetch<T>::lookup() {
     Also, the buffer pool could get resized and m_guess's chunk could get freed,
     so we need to check the `block` pointer is still within one of the chunks
     before dereferencing it to verify it still contains the same m_page_id */
+
+    // Buf_fetch 类可能被多次调用，而压缩页的描述符可能在短期内失效
+    // 这里需要检查一下之前查询得到的 block 是否还有效
 
     if (!buf_is_block_in_instance(m_buf_pool, block) ||
         m_page_id != block->page.id ||
@@ -4267,12 +4277,14 @@ buf_block_t *Buf_fetch<T>::single_page() {
   Counter::inc(m_buf_pool->stat.m_n_page_gets, m_page_id.page_no());
 
   for (;;) {
+    // 这里会根据类型来读取出需要的 page，不保证 page 已经在 buffer pool 中。
+    // 如果使用 sync操作，会发生随机预读
     if (static_cast<T *>(this)->get(block) == DB_NOT_FOUND) {
       return (nullptr);
     }
     ut_a(!block->page.was_stale());
 
-    if (is_optimistic()) {
+    if (is_optimistic() /* 乐观操作，不进行 IO */) {
       const auto bpage = &block->page;
       auto block_mutex = buf_page_get_mutex(bpage);
 
@@ -4285,7 +4297,8 @@ buf_block_t *Buf_fetch<T>::single_page() {
       if (state == BUF_IO_READ) {
         /* The page is being read to buffer pool, but we cannot wait around for
         the read to complete. */
-
+        /// get 函数中增加了一次计数，但是 get 只负责找到 block
+        /// 乐观操作中没有 page，所以这里放弃引用计数
         buf_block_unfix(block);
 
         return (nullptr);
@@ -4378,6 +4391,8 @@ buf_block_t *Buf_fetch<T>::single_page() {
 
   /* We have to wait here because the IO_READ state was set under the protection
   of the hash_lock and not the block->mutex and block->lock. */
+  // 这里表面读取是悲观的，需要确保 page 被读取出来，
+  // 如果 block 没有在 buffer pool 中，会阻塞等待读取
   buf_wait_for_read(block);
 
   /* Mark block as dirty if requested by caller. If not requested (false)
@@ -4428,6 +4443,7 @@ buf_block_t *buf_page_get_gen(const page_id_t &page_id,
   ut_ad(!ibuf_inside(mtr) ||
         ibuf_page_low(page_id, page_size, false, location, nullptr));
 
+  // 类型检查
   switch (mode) {
     case Page_fetch::NO_LATCH:
       ut_ad(rw_latch == RW_NO_LATCH);
@@ -4453,6 +4469,7 @@ buf_block_t *buf_page_get_gen(const page_id_t &page_id,
   ut_ad(!found || page_size.equals_to(space_page_size));
 #endif /* UNIV_DEBUG */
 
+  // 创建 fetch 抽象对象，并且调用 single page 接口
   if (mode == Page_fetch::NORMAL && !fsp_is_system_temporary(page_id.space())) {
     Buf_fetch_normal fetch(page_id, page_size);
 
@@ -4874,6 +4891,7 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
   }
 
   if (page_size.is_compressed() && !unzip && !recv_recovery_is_on()) {
+    // 这个分支代表 page id 对应的是一个 watch，或者压缩页
     block = nullptr;
   } else {
     // 从 LRU 链表中选择空白块/释放空白块
@@ -4885,7 +4903,7 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
 
   buf_page_t *bpage = nullptr;
   if (block == nullptr) {
-    // 这个分支对应上面的只请求压缩页
+    // 对应情况为读取到 watch 中
     bpage = buf_page_alloc_descriptor();
   }
 
@@ -4902,7 +4920,7 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
 
   buf_page_t *watch_page;
 
-  // 尝试从 buffer pool 中查找 page 是否存在
+  // 尝试从 buffer pool 中查找 watch page 是否存在
   watch_page = buf_page_hash_get_low(buf_pool, page_id);
 
   if (watch_page != nullptr &&
@@ -4932,6 +4950,7 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
   }
 
   if (block != nullptr) {
+
     ut_ad(!bpage);
     bpage = &block->page;
 
@@ -5013,6 +5032,8 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
 
     ut_d(bpage->in_page_hash = true);
 
+    // 如果是读入到 watch page 中，将 watch page 信息拷贝给新 page，
+    // 然后清空 watch page 内容
     if (watch_page != nullptr) {
       /* Preserve the reference count. */
       uint32_t buf_fix_count;

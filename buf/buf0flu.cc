@@ -741,7 +741,7 @@ static bool buf_flush_ready_for_flush_gen(buf_page_t *bpage,
          buf_flush_list_mutex_own(buf_pool)));
 
   ut_ad(flush_type < BUF_FLUSH_N_TYPES);
-
+  //  脏页，并且不在 IO 过程中
   if (!bpage->is_dirty() ||
       (atomic ? bpage->get_io_fix() != BUF_IO_NONE : bpage->was_io_fixed())) {
     return false;
@@ -1307,8 +1307,8 @@ bool buf_flush_page(buf_pool_t *buf_pool, buf_page_t *bpage,
   if (!is_uncompressed) {
     flush = true;
     rw_lock = nullptr;
-  } else if (!(no_fix_count || flush_type == BUF_FLUSH_LIST) ||
-             (!no_fix_count &&
+  } else if (!(no_fix_count || flush_type == BUF_FLUSH_LIST) /*当页面 fixed 只允许用 FLUSH LIST 模式*/
+             || (!no_fix_count &&
               srv_shutdown_state.load() < SRV_SHUTDOWN_FLUSH_PHASE &&
               fsp_is_system_temporary(bpage->id.space()))) {
     /* This is a heuristic, to avoid expensive SX attempts. */
@@ -1766,8 +1766,8 @@ static ulint buf_flush_LRU_list_batch(buf_pool_t *buf_pool, ulint max) {
   for (bpage = UT_LIST_GET_LAST(buf_pool->LRU);
        bpage != nullptr && count + evict_count < max &&
        free_len < srv_LRU_scan_depth + withdraw_depth &&
-       lru_len > BUF_LRU_MIN_LEN;
-       ++scanned, bpage = buf_pool->lru_hp.get()) {
+       lru_len > BUF_LRU_MIN_LEN; ++scanned, bpage = buf_pool->lru_hp.get()) {
+
     ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
 
     auto prev = UT_LIST_GET_PREV(LRU, bpage);

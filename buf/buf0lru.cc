@@ -1569,7 +1569,8 @@ static inline void buf_LRU_remove_block(buf_page_t *bpage) {
 
   /* If the LRU_old pointer is defined and points to just this block,
   move it backward one step */
-
+  // 如果移除时，page 是 old 链表头，那么把前面一个 page 设置为 old，这样能够避免多步调整
+  // 这是由于 old 链表中可能只有一个节点，如果使用后继节点较为麻烦
   if (bpage == buf_pool->LRU_old) {
     /* Below: the previous block is guaranteed to exist,
     because the LRU_old pointer is only allowed to differ
@@ -1725,11 +1726,10 @@ void buf_LRU_make_block_young(buf_page_t *bpage) {
   buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
 
   ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
-
+  // 这里为什么要更新计数器？？
   if (bpage->old) {
     buf_pool->stat.n_pages_made_young++;
   }
-
   buf_LRU_remove_block(bpage);
   buf_LRU_add_block_low(bpage, false);
 }

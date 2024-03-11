@@ -188,6 +188,7 @@ static inline bool buf_page_peek_if_too_old(const buf_page_t *bpage) {
              bpage->old) {
     const auto access_time = buf_page_is_accessed(bpage);
 
+    // 距离上一次访问的时间已经超过 LRU_old_threshold
     if (access_time != std::chrono::steady_clock::time_point{} &&
         (std::chrono::steady_clock::now() - access_time) >=
             get_buf_LRU_old_threshold()) {

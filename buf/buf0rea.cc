@@ -87,7 +87,7 @@ ulint buf_read_page_low(dberr_t *err, bool sync, ulint type, ulint mode,
     sync = true;
   }
 
-  // 在内存中分配出 page 相关的 block 等资源
+  // 在内存中分配出 page 相关的 block 等资源，这里同样会进行 watch 相关的操作
   /* The following call will also check if the tablespace does not exist
   or is being dropped; if we succeed in initing the page in the buffer
   pool for read, then DISCARD cannot proceed until the read has
