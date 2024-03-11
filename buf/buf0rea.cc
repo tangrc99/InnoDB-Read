@@ -87,6 +87,7 @@ ulint buf_read_page_low(dberr_t *err, bool sync, ulint type, ulint mode,
     sync = true;
   }
 
+  // 在内存中分配出 page 相关的 block 等资源
   /* The following call will also check if the tablespace does not exist
   or is being dropped; if we succeed in initing the page in the buffer
   pool for read, then DISCARD cannot proceed until the read has
@@ -113,6 +114,7 @@ ulint buf_read_page_low(dberr_t *err, bool sync, ulint type, ulint mode,
 
   void *dst;
 
+  // 不同类型的页，读取数据的位置不同
   if (page_size.is_compressed()) {
     dst = bpage->zip.data;
   } else {
@@ -123,6 +125,7 @@ ulint buf_read_page_low(dberr_t *err, bool sync, ulint type, ulint mode,
 
   IORequest request(type | IORequest::READ);
 
+  // 完成异步读取
   *err = fil_io(request, sync, page_id, page_size, 0, page_size.physical(), dst,
                 bpage);
 
@@ -178,6 +181,7 @@ ulint buf_read_ahead_random(const page_id_t &page_id,
     return (0);
   }
 
+  // 通过偏置量计算出当前 page 所在的 random read 区域
   low = (page_id.page_no() / buf_read_ahead_random_area) *
         buf_read_ahead_random_area;
 
@@ -188,6 +192,7 @@ ulint buf_read_ahead_random(const page_id_t &page_id,
   below: if DISCARD + IMPORT changes the actual .ibd file meanwhile, we
   do not try to read outside the bounds of the tablespace! */
   if (fil_space_t *space = fil_space_acquire_silent(page_id.space())) {
+    // 防止 random read 超出文件大小
     if (high > space->size) {
       high = space->size;
     }
@@ -205,6 +210,9 @@ ulint buf_read_ahead_random(const page_id_t &page_id,
   /* Count how many blocks in the area have been recently accessed,
   that is, reside near the start of the LRU list. */
 
+  /// 处于LRU list前1/4的热点页面个数超过 BUF_READ_AHEAD_RANDOM_THRESHOLD 时，
+  /// 会采用异步IO和IO合并的方式将该extent内所有页面都读入buffer pool。
+
   for (i = low; i < high; i++) {
     rw_lock_t *hash_lock;
     const buf_page_t *bpage;
@@ -215,9 +223,9 @@ ulint buf_read_ahead_random(const page_id_t &page_id,
     if (bpage != nullptr &&
         buf_page_is_accessed(bpage) !=
             std::chrono::steady_clock::time_point{} &&
-        buf_page_peek_if_young(bpage)) {
+        buf_page_peek_if_young(bpage) /* 判断该页面是否在 LRU 链表前侧 */) {
       recent_blocks++;
-
+      // 如果满足条件的 block 大于 13 个，开始执行随机预读
       if (recent_blocks >= BUF_READ_AHEAD_RANDOM_THRESHOLD(buf_pool)) {
         rw_lock_s_unlock(hash_lock);
         goto read_ahead;
@@ -248,7 +256,8 @@ read_ahead:
     mode: hence false as the first parameter */
 
     const page_id_t cur_page_id(page_id.space(), i);
-
+    // 因为需要大批量读取 pages，所以使用非同步交叠读取的时间
+    // 下面会 wake threads，所以使用 DO_NOT_WAKE 标识位
     if (!ibuf_bitmap_page(cur_page_id, page_size)) {
       count += buf_read_page_low(&err, false, IORequest::DO_NOT_WAKE, ibuf_mode,
                                  cur_page_id, page_size, false);
@@ -285,12 +294,14 @@ read_ahead:
 }
 
 bool buf_read_page(const page_id_t &page_id, const page_size_t &page_size) {
+  /// 该函数是同步读取页面的函数
   ulint count;
   dberr_t err;
 
+  // 这里以aio 同步的方式读取出指定的页面
   count = buf_read_page_low(&err, true, 0, BUF_READ_ANY_PAGE, page_id,
                             page_size, false);
-
+  // 修改相关计数
   srv_stats.buf_pool_reads.add(count);
 
   if (err == DB_TABLESPACE_DELETED) {
@@ -306,6 +317,7 @@ bool buf_read_page(const page_id_t &page_id, const page_size_t &page_size) {
 
 bool buf_read_page_background(const page_id_t &page_id,
                               const page_size_t &page_size, bool sync) {
+  /// 该函数是同异步读取页面的函数
   ulint count;
   dberr_t err;
 
@@ -314,6 +326,8 @@ bool buf_read_page_background(const page_id_t &page_id,
                             BUF_READ_ANY_PAGE, page_id, page_size, false);
 
   srv_stats.buf_pool_reads.add(count);
+
+  /// ? 疑问 ? 这里是因为 background 函数仅仅是被 btree 扫描时才会使用吗？
 
   /* We do not increment number of I/O operations used for LRU policy
   here (buf_LRU_stat_inc_io()). We use this in heuristics to decide
@@ -342,6 +356,8 @@ ulint buf_read_ahead_linear(const page_id_t &page_id,
   page_no_t i;
   const page_no_t buf_read_ahead_linear_area = buf_pool->read_ahead_area;
   page_no_t threshold;
+
+  /// 准备流程与 random read 是相同的
 
   /* check if readahead is disabled */
   if (!srv_read_ahead_threshold) {
@@ -422,12 +438,16 @@ ulint buf_read_ahead_linear(const page_id_t &page_id,
     bpage = buf_page_hash_get_s_locked(buf_pool, page_id_t(page_id.space(), i),
                                        &hash_lock);
 
+    // 如果页面没有被读取，或者是本次才被读取，失败计数
     if (bpage == nullptr || buf_page_is_accessed(bpage) ==
                                 std::chrono::steady_clock::time_point{}) {
       /* Not accessed */
       fail_count++;
 
     } else if (pred_bpage) {
+      // pageid 小的页面在之前就被读取，证明相邻的页面的访问时间具有顺序性
+      // 这里要保证访问时间随着 pageid 增大而增大
+
       /* Note that buf_page_is_accessed() returns
       the time of the first access.  If some blocks
       of the extent existed in the buffer pool at
@@ -472,12 +492,13 @@ ulint buf_read_ahead_linear(const page_id_t &page_id,
   /* If we got this far, we know that enough pages in the area have
   been accessed in the right order: linear read-ahead can be sensible */
 
+  // 这个 bpage 是用户需要读取的页面
   bpage = buf_page_hash_get_s_locked(buf_pool, page_id, &hash_lock);
 
   if (bpage == nullptr) {
     return (0);
   }
-
+  // 这一步获取 frame 是为了得到 file_page 信息
   switch (buf_page_get_state(bpage)) {
     case BUF_BLOCK_ZIP_PAGE:
       frame = bpage->zip.data;
@@ -496,17 +517,21 @@ ulint buf_read_ahead_linear(const page_id_t &page_id,
   prevent deadlocks. Even if we read values which are nonsense, the
   algorithm will work. */
 
-  pred_offset = fil_page_get_prev(frame);
-  succ_offset = fil_page_get_next(frame);
+  pred_offset = fil_page_get_prev(frame); // 上一个或本个file_page位置
+  succ_offset = fil_page_get_next(frame); // 下一个file_page位置
 
   rw_lock_s_unlock(hash_lock);
 
   if ((page_id.page_no() == low) && (succ_offset == page_id.page_no() + 1)) {
+    // 触发线性读的可能 1: file page 的最左边界位置
+    // 根据上面的访问判断，这是一个向左的读取，可以线性预读之前的页面
     /* This is ok, we can continue */
     new_offset = pred_offset;
 
   } else if ((page_id.page_no() == high - 1) &&
              (pred_offset == page_id.page_no() - 1)) {
+    // 触发线性读的可能 2: file page 的最右边界位置
+    // 根据上面的访问判断，这是一个向右的读取，可以线性预读下一个范围的页面
     /* This is ok, we can continue */
     new_offset = succ_offset;
   } else {
@@ -515,6 +540,7 @@ ulint buf_read_ahead_linear(const page_id_t &page_id,
     return (0);
   }
 
+  // 计算出需要线性预读区域的边界（向左或者是向右）
   low = (new_offset / buf_read_ahead_linear_area) * buf_read_ahead_linear_area;
   high = (new_offset / buf_read_ahead_linear_area + 1) *
          buf_read_ahead_linear_area;
@@ -545,6 +571,7 @@ ulint buf_read_ahead_linear(const page_id_t &page_id,
 
   os_aio_simulated_put_read_threads_to_sleep();
 
+  // 在求出的范围内进行线性预读操作
   for (i = low; i < high; i++) {
     /* It is only sensible to do read-ahead in the non-sync
     aio mode: hence false as the first parameter */
@@ -680,7 +707,7 @@ void buf_read_recv_pages(space_id_t space_id, const page_no_t *page_nos,
                             << " to " << req_size << " pages"
                             << " for page number: " << page_nos[n_stored - 1]
                             << " during recovery.";
-
+    // 将 table space 按照 FSP_EXTENT_SIZE 对齐扩充
     if (!fil_space_extend(space, req_size)) {
       ib::error(ER_IB_MSG_144)
           << "Could not extend tablespace: " << space->id
@@ -699,7 +726,6 @@ void buf_read_recv_pages(space_id_t space_id, const page_no_t *page_nos,
 
     buf_pool = buf_pool_get(cur_page_id);
     os_rmb;
-
     while (buf_pool->n_pend_reads >=
            recv_n_frames_for_pages_per_pool_instance / 2) {
       os_aio_simulated_wake_handler_threads();

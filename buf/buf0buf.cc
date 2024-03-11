@@ -4805,6 +4805,7 @@ static void buf_page_init(buf_pool_t *buf_pool, const page_id_t &page_id,
 
   ut_ad(!block->page.was_stale());
 
+  // 尝试用页哈希中找到 page，如果找到了需要做一些额外操作
   hash_page = buf_page_hash_get_low(buf_pool, page_id);
 
   if (hash_page == nullptr) {
@@ -4875,7 +4876,7 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
   if (page_size.is_compressed() && !unzip && !recv_recovery_is_on()) {
     block = nullptr;
   } else {
-    // 从 LRU 链表
+    // 从 LRU 链表中选择空白块/释放空白块
     block = buf_LRU_get_free_block(buf_pool);
     ut_ad(block);
     ut_ad(!block->page.someone_has_io_responsibility());
@@ -4884,10 +4885,11 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
 
   buf_page_t *bpage = nullptr;
   if (block == nullptr) {
-    // 这个分支对应上面的压缩页
+    // 这个分支对应上面的只请求压缩页
     bpage = buf_page_alloc_descriptor();
   }
 
+  // 压缩页使用伙伴系统分配内存
   if ((block != nullptr && page_size.is_compressed()) || block == nullptr) {
     data = buf_buddy_alloc(buf_pool, page_size.physical());
   }
@@ -4900,13 +4902,14 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
 
   buf_page_t *watch_page;
 
+  // 尝试从 buffer pool 中查找 page 是否存在
   watch_page = buf_page_hash_get_low(buf_pool, page_id);
 
   if (watch_page != nullptr &&
       !buf_pool_watch_is_sentinel(buf_pool, watch_page)) {
     /* The page is already in the buffer pool. */
     watch_page = nullptr;
-
+    // 先释放锁，然后释放已分配的资源
     mutex_exit(&buf_pool->LRU_list_mutex);
 
     rw_lock_x_unlock(hash_lock);
@@ -4942,6 +4945,7 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
     safe because no other thread can lookup the block from the
     page hashtable yet. */
 
+    // 读取 page 前，首先将其设置为 io fixed 状态
     block->mark_for_read_io();
     buf_page_set_io_fix(bpage, BUF_IO_READ);
 
@@ -5039,6 +5043,7 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
     mutex_exit(&buf_pool->zip_mutex);
   }
 
+  // 增加读取的计数器
   buf_pool->n_pend_reads.fetch_add(1);
 func_exit:
 
