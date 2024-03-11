@@ -618,6 +618,9 @@ void buf_read_ibuf_merge_pages(bool sync, const space_id_t *space_ids,
 
   ut::unordered_map<space_id_t, fil_space_t *> acquired_spaces;
 
+  // 根据 pageid 找到 page 以及对应的 space，并使用 fil_space_acquire_silent 读取相关信息
+  // 如果无法找到对应 space，删除掉对应的 ibuf page
+  // 读取过程的最后一个 page 会根据 sync 标识位决定是否使用同步操作
   for (ulint i = 0; i < n_stored; i++) {
     const page_id_t page_id(space_ids[i], page_nos[i]);
 
