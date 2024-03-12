@@ -680,7 +680,7 @@ void btr_cur_search_to_nth_level(
   ulint n_releases = 0;
   bool detected_same_key_root = false;
 
-  bool retrying_for_search_prev = false;
+  bool retrying_for_search_prev = false;  // 处于第几次搜寻中
   ulint leftmost_from_level = 0;
   buf_block_t **prev_tree_blocks = nullptr;
   ulint *prev_tree_savepoints = nullptr;
