@@ -205,7 +205,7 @@ btr_latch_leaves_t btr_cur_latch_leaves(buf_block_t *block,
             mtr_set_savepoint(mtr);
       }
 
-      mode = latch_mode == BTR_MODIFY_LEAF ? RW_X_LATCH : RW_S_LATCH;
+      mode = (latch_mode == BTR_MODIFY_LEAF) ? RW_X_LATCH : RW_S_LATCH;
       latch_leaves.savepoints[1] = mtr_set_savepoint(mtr);
       get_block = btr_block_get(page_id, page_size, mode, UT_LOCATION_HERE,
                                 cursor->index, mtr);
@@ -354,7 +354,7 @@ bool btr_cur_optimistic_latch_leaves(buf_block_t *block, uint64_t modify_clock,
                                       cursor->m_fetch_mode, file, line, mtr));
     case BTR_SEARCH_PREV:
     case BTR_MODIFY_PREV:
-      mode = *latch_mode == BTR_SEARCH_PREV ? RW_S_LATCH : RW_X_LATCH;
+      mode = (*latch_mode == BTR_SEARCH_PREV) ? RW_S_LATCH : RW_X_LATCH;
 
       rw_lock_s_lock(&block->lock, UT_LOCATION_HERE);
       if (block->modify_clock != modify_clock) {
@@ -486,7 +486,7 @@ static bool btr_cur_will_modify_tree(dict_index_t *index, const page_t *page,
   if (lock_intention <= BTR_INTENTION_BOTH) {
     ulint margin;
 
-    if (lock_intention == BTR_INTENTION_BOTH) {
+    if (lock_intention == BTR_INTENTION_BOTH /* 表示这是一个删除操作 */) {
       ulint level = btr_page_get_level(page);
 
       /* This value is the worst expectation for the node_ptr records to be
@@ -506,8 +506,8 @@ static bool btr_cur_will_modify_tree(dict_index_t *index, const page_t *page,
 
       /* check delete will cause. (BTR_INTENTION_BOTH
       or BTR_INTENTION_DELETE) */
-      if (page_get_n_recs(page) <= max_nodes_deleted * 2 ||
-          page_rec_is_first(rec, page)) {
+      if (page_get_n_recs(page) <= max_nodes_deleted * 2 /* 从头或尾删除都可能导致结构调整 */
+          || page_rec_is_first(rec, page) /* page 是第一条记录，被删除会导致页面被删除 */) {
         /* The cursor record can be the left_most record in this page. */
         return (true);
       }
@@ -515,12 +515,16 @@ static bool btr_cur_will_modify_tree(dict_index_t *index, const page_t *page,
       if (fil_page_get_prev(page) != FIL_NULL &&
           page_rec_distance_is_at_most(page_get_infimum_rec(page), rec,
                                        max_nodes_deleted)) {
+        // 页面有前驱并且距离第一条记录的距离小于max_nodes_deleted
+        // 在极端情况下该记录可能会被删除至头部，然后导致树结构调整
         return (true);
       }
 
       if (fil_page_get_next(page) != FIL_NULL &&
           page_rec_distance_is_at_most(rec, page_get_supremum_rec(page),
                                        max_nodes_deleted)) {
+        // 页面有后继并且距离最后一条记录的距离小于max_nodes_deleted
+        // 在极端情况下该记录可能会被删除至尾部，然后导致树结构调整
         return (true);
       }
 
@@ -591,11 +595,15 @@ static bool btr_cur_need_opposite_intention(const page_t *page,
                                             const rec_t *rec) {
   switch (lock_intention) {
     case BTR_INTENTION_DELETE:
+      // 对于删除操作，有两种情况涉及到结构的变更
+      // 1. 删除的记录位于页面最前侧，并且页面具有前向页面
+      // 2. 删除的记录位于页面最后侧，并且页面具有后向页面
       return ((mach_read_from_4(page + FIL_PAGE_PREV) != FIL_NULL &&
                page_rec_is_first(rec, page)) ||
               (mach_read_from_4(page + FIL_PAGE_NEXT) != FIL_NULL &&
                page_rec_is_last(rec, page)));
     case BTR_INTENTION_INSERT:
+      // 对于插入操作，当插入记录是最后一条并且 page 不是最后一个 page
       return (mach_read_from_4(page + FIL_PAGE_NEXT) != FIL_NULL &&
               page_rec_is_last(rec, page));
     case BTR_INTENTION_BOTH:
@@ -707,7 +715,7 @@ void btr_cur_search_to_nth_level(
   cursor->up_match = ULINT_UNDEFINED;
   cursor->low_match = ULINT_UNDEFINED;
 #endif /* UNIV_DEBUG */
-
+  // 只有当 latch_mode == 0 时，为真
   bool s_latch_by_caller = latch_mode & BTR_ALREADY_S_LATCHED;
   latch_mode &= ~BTR_ALREADY_S_LATCHED;
 
@@ -770,6 +778,7 @@ void btr_cur_search_to_nth_level(
 #ifdef UNIV_SEARCH_PERF_STAT
   info->n_searches++;
 #endif
+  /// 尝试使用自适应哈希索引来读取页面
   /* Use of AHI is disabled for intrinsic table as these tables re-use
   the index-id and AHI validation is based on index-id. */
   if (rw_lock_get_writer(btr_get_search_latch(index)) == RW_LOCK_NOT_LOCKED &&
@@ -795,6 +804,7 @@ void btr_cur_search_to_nth_level(
 
     return;
   }
+  /// 无法使用自适应哈希索引，使用二分查找
   btr_cur_n_non_sea++;
   DBUG_EXECUTE_IF("non_ahi_search",
                   assert(!strcmp(index->table->name.m_name, "test/t1")););
@@ -811,9 +821,11 @@ void btr_cur_search_to_nth_level(
   know how to release it when we have latched leaf node(s) */
 
   savepoint = mtr_set_savepoint(mtr);
-
+  // 判断需要对树index 加什么类型的锁
   switch (latch_mode) {
     case BTR_MODIFY_TREE:
+      /// 如果这是一个修改操作，那么有两种情况是对树加 X 锁，其余加 SX 锁
+
       /* Most of delete-intended operations are purging.
       Free blocks and read IO bandwidth should be prior
       for them, when the history list is glowing huge. */
@@ -835,6 +847,8 @@ void btr_cur_search_to_nth_level(
       break;
     case BTR_CONT_MODIFY_TREE:
     case BTR_CONT_SEARCH_TREE:
+      /// 这种操作已经在之前完成了加锁，不需要处理
+
       /* Do nothing */
       ut_ad(srv_read_only_mode ||
             mtr_memo_contains_flagged(mtr, dict_index_get_lock(index),
@@ -850,6 +864,7 @@ void btr_cur_search_to_nth_level(
       break;
     default:
       if (!srv_read_only_mode) {
+
         if (s_latch_by_caller) {
           /* The BTR_ALREADY_S_LATCHED indicates that the index->lock has been
           taken either in RW_S_LATCH or RW_SX_LATCH mode. For parallel reads
@@ -868,7 +883,9 @@ void btr_cur_search_to_nth_level(
           mtr_sx_lock(dict_index_get_lock(index), mtr, UT_LOCATION_HERE);
         }
         upper_rw_latch = RW_S_LATCH;
+
       } else {
+        // 只读模式下不存在写操作，不需要加读锁
         upper_rw_latch = RW_NO_LATCH;
       }
   }
@@ -891,7 +908,7 @@ void btr_cur_search_to_nth_level(
   low_match = 0;
   low_bytes = 0;
 
-  height = ULINT_UNDEFINED;
+  height = ULINT_UNDEFINED; // 对应根节点的高度
 
   /* We use these modified search modes on non-leaf levels of the
   B-tree. These let us end up in the right B-tree leaf. In that leaf
@@ -917,7 +934,8 @@ void btr_cur_search_to_nth_level(
   }
 
   /* Loop and search until we arrive at the desired level */
-  btr_latch_leaves_t latch_leaves = {{nullptr, nullptr, nullptr}, {0, 0, 0}};
+  btr_latch_leaves_t latch_leaves = {{nullptr, nullptr, nullptr},
+                                     {0, 0, 0}};
 
 search_loop:
   fetch = cursor->m_fetch_mode;
@@ -927,7 +945,7 @@ search_loop:
   if (height != 0) {
     /* We are about to fetch the root or a non-leaf page. */
     if ((latch_mode != BTR_MODIFY_TREE || height == level) &&
-        !retrying_for_search_prev) {
+        !retrying_for_search_prev /* 第一次找到需要的索引页面 */) {
       /* If doesn't have SX or X latch of index,
       each pages should be latched before reading. */
       if (modify_external && height == ULINT_UNDEFINED &&
@@ -953,8 +971,9 @@ search_loop:
   }
 
 retry_page_get:
-  ut_ad(n_blocks < BTR_MAX_LEVELS);
+  ut_ad(n_blocks < BTR_MAX_LEVELS); // n_block 代表高度
   tree_savepoints[n_blocks] = mtr_set_savepoint(mtr);
+  // 从 buffer pool 拿页面，如果是 root，使用 guess
   block = buf_page_get_gen(
       page_id, page_size, rw_latch,
       (height == ULINT_UNDEFINED ? index->search_info->root_guess : nullptr),
@@ -963,12 +982,14 @@ retry_page_get:
   tree_blocks[n_blocks] = block;
 
   if (block == nullptr) {
+
     /* This must be a search to perform an insert/delete
     mark/ delete; try using the insert/delete buffer */
 
     ut_ad(height == 0);
     ut_ad(cursor->thr);
-
+    /// 对插入和删除操作来说，数据可以插入到 ibuf 中，所以使用乐观的方式来获取页面
+    /// 当页面不在池中会立刻返回 nullptr，这时候页面正在读取中，线程对ibuf操作就可以了
     switch (btr_op) {
       case BTR_INSERT_OP:
       case BTR_INSERT_IGNORE_UNIQUE_OP:
@@ -1068,6 +1089,7 @@ retry_page_get:
 
   page = buf_block_get_frame(block);
 
+  // 这个分支对应的是 tree 的 root 节点存储数据，这时候要释放 root 锁，并加页锁。
   if (height == ULINT_UNDEFINED && page_is_leaf(page) &&
       rw_latch != RW_NO_LATCH && rw_latch != root_leaf_rw_latch) {
     /* We should retry to get the page, because the root page
@@ -1100,6 +1122,7 @@ retry_page_get:
 
   if (UNIV_UNLIKELY(height == ULINT_UNDEFINED)) {
     /* We are in the root node */
+    // 这个分支要做的就是记录一下树相关信息，以及 root 节点的缓冲
 
     height = btr_page_get_level(page);
     root_height = height;
@@ -1130,7 +1153,8 @@ retry_page_get:
     index->search_info->root_guess = block;
   }
 
-  if (height == 0) {
+  // 这个分支对应叶子节点，由于搜寻是 BFS，这里表示期望的 level == 0
+  if (height == 0 /* height == level == 0 */) {
     if (rw_latch == RW_NO_LATCH) {
       latch_leaves = btr_cur_latch_leaves(block, page_id, page_size, latch_mode,
                                           cursor, mtr);
@@ -1142,6 +1166,9 @@ retry_page_get:
       case BTR_CONT_SEARCH_TREE:
         break;
       default:
+        // case BTR_SEARCH_LEAF BTR_MODIFY_LEAF BTR_SEARCH_TREE
+        // BTR_NO_LATCHES BTR_SEARCH_PREV BTR_MODIFY_PREV
+        // 这对应着只修改 page 的操作或只读操作，可以释放路径节点了
         if (!s_latch_by_caller && !srv_read_only_mode && !modify_external) {
           /* Release the tree s-latch */
           /* NOTE: BTR_MODIFY_EXTERNAL
@@ -1301,13 +1328,14 @@ retry_page_get:
 
     offsets = rec_get_offsets(node_ptr, index, offsets, ULINT_UNDEFINED,
                               UT_LOCATION_HERE, &heap);
-
     /* If the rec is the first or last in the page for
     pessimistic delete intention, it might cause node_ptr insert
     for the upper level. We should change the intention and retry.
     */
     if (latch_mode == BTR_MODIFY_TREE &&
         btr_cur_need_opposite_intention(page, lock_intention, node_ptr)) {
+      // 虽然还没有查找到叶子节点，但是这里已经可以断定修改会破坏树结构，提前进行回溯
+
     need_opposite_intention:
       ut_ad(upper_rw_latch == RW_X_LATCH);
 
@@ -1323,7 +1351,7 @@ retry_page_get:
       }
 
       lock_intention = BTR_INTENTION_BOTH;
-
+      // 将搜索的位置重置为根节点
       page_id.reset(space, dict_index_get_page(index));
       up_match = 0;
       low_match = 0;
@@ -1438,16 +1466,18 @@ retry_page_get:
 
     /* If the page might cause modify_tree,
     we should not release the parent page's lock. */
+    /// 这里的逻辑是判断能不能提前释放拿到的路径节点上的锁
     if (!detected_same_key_root && latch_mode == BTR_MODIFY_TREE &&
         !btr_cur_will_modify_tree(index, page, lock_intention, node_ptr,
-                                  node_ptr_max_size, page_size, mtr) &&
-        !rtree_parent_modified) {
+                                  node_ptr_max_size, page_size, mtr) /* 本层节点不修改 */ &&
+        !rtree_parent_modified /* 上层节点没有被修改 */) {
       ut_ad(upper_rw_latch == RW_X_LATCH);
       ut_ad(n_releases <= n_blocks);
 
       /* we can release upper blocks */
       for (; n_releases < n_blocks; n_releases++) {
         if (n_releases == 0) {
+          // 不释放根节点是因为它有很大概率会被再次访问，这样可以尽量避免 guess 指针失效。
           /* we should not release root page
           to pin to same block. */
           continue;
@@ -1459,6 +1489,8 @@ retry_page_get:
       }
     }
 
+    // 注意这个分支在 height != level 判断前提下，然后在执行中 height -= 1
+    // 所以代表所有的索引页都已经搜寻完毕，如果是 BTR_MODIFY_TREE 操作，路径上所有的访问的节点已经确定
     if (height == level && latch_mode == BTR_MODIFY_TREE) {
       ut_ad(upper_rw_latch == RW_X_LATCH);
       /* we should sx-latch root page, if released already.
@@ -1478,7 +1510,7 @@ retry_page_get:
     is the leftmost of the page. because BTR_SEARCH_PREV and
     BTR_MODIFY_PREV latches prev_page of the leaf page. */
     if ((latch_mode == BTR_SEARCH_PREV || latch_mode == BTR_MODIFY_PREV) &&
-        !retrying_for_search_prev) {
+        !retrying_for_search_prev /* 第一次阶段 */) {
       /* block should be latched for consistent
          btr_page_get_prev() */
       ut_ad(mtr_memo_contains_flagged(
@@ -1486,18 +1518,20 @@ retry_page_get:
 
       if (btr_page_get_prev(page, mtr) != FIL_NULL &&
           page_rec_is_first(node_ptr, page)) {
+        // 叶节点第一个记录的前驱在上面的层
         if (leftmost_from_level == 0) {
           leftmost_from_level = height + 1;
         }
       } else {
+        // 第一个页面，或者不在本页第一条记录，在本层进行修改
         leftmost_from_level = 0;
       }
-
+      // 已经搜寻到叶节点，这时候需要进行回溯搜索
       if (height == 0 && leftmost_from_level > 0) {
         /* should retry to get also prev_page
         from level==leftmost_from_level. */
         retrying_for_search_prev = true;
-
+        // 计算出需要回溯的距离，然后释放不需要访问的节点
         prev_tree_blocks = static_cast<buf_block_t **>(
             ut::malloc_withkey(UT_NEW_THIS_FILE_PSI_KEY,
                                sizeof(buf_block_t *) * leftmost_from_level));
@@ -1516,6 +1550,7 @@ retry_page_get:
                                          tree_blocks[i]);
         }
 
+        // 从需要访问的第一个节点进行回溯
         n_blocks -= (leftmost_from_level - 1);
         height = leftmost_from_level;
         ut_ad(n_releases == 0);
@@ -1535,6 +1570,7 @@ retry_page_get:
       }
     }
 
+    // 从这里拿出下一个需要访问的节点，然后继续进行搜索
     /* Go to the child node */
     page_id.reset(space, btr_node_ptr_get_child_page_no(node_ptr, offsets));
 
@@ -1586,14 +1622,18 @@ retry_page_get:
     goto search_loop;
   } else if (!dict_index_is_spatial(index) && latch_mode == BTR_MODIFY_TREE &&
              lock_intention == BTR_INTENTION_INSERT &&
+             // 插入情况，page 具有下一页，并且插入 page 尾，可能导致分裂
              mach_read_from_4(page + FIL_PAGE_NEXT) != FIL_NULL &&
              page_rec_is_last(page_cur_get_rec(page_cursor), page)) {
+    // 这个分支已经确保 height == level，也就是找到了 record 对应的位置
+    // 但是因为可能导致树分裂，所以本次放弃操作，重新加 X 锁来搜索
+
     /* btr_insert_into_right_sibling() might cause
     deleting node_ptr at upper level */
 
     if (height == 0) {
       /* release the leaf pages if latched */
-      for (uint i = 0; i < 3; i++) {
+      for (uint i = 0; i < 3 /* 3 是相邻的加锁节点数量 */; i++) {
         if (latch_leaves.blocks[i] != nullptr) {
           mtr_release_block_at_savepoint(mtr, latch_leaves.savepoints[i],
                                          latch_leaves.blocks[i]);
@@ -1601,11 +1641,13 @@ retry_page_get:
         }
       }
     }
-
+    /// 这里进入的逻辑是：1.释放当前持有的所有锁，但是不释放index. 2.修改加锁意向为 X.
+    /// 3.将 cursor 重置为 index，重新开始搜索
     goto need_opposite_intention;
   }
 
-  if (level != 0) {
+  // 运行到这里已经确定了 height == level，这是对应搜寻位置在内部节点的情况
+  if (level != 0 /* height == level == 0 */) {
     if (upper_rw_latch == RW_NO_LATCH) {
       /* latch the page */
       buf_block_t *child_block;
@@ -1618,8 +1660,9 @@ retry_page_get:
         child_block = btr_block_get(page_id, page_size, RW_SX_LATCH,
                                     UT_LOCATION_HERE, index, mtr);
       }
-
+      // 检查页面完整性
       btr_assert_not_corrupted(child_block, index);
+
     } else {
       ut_ad(mtr_memo_contains(mtr, block, upper_rw_latch));
       btr_assert_not_corrupted(block, index);
@@ -1643,7 +1686,10 @@ retry_page_get:
       cursor->low_match = low_match;
       cursor->up_match = up_match;
     }
+
   } else {
+    // 运行到这里已经确定了 height == level，这是对应搜寻位置在叶子节点
+
     cursor->low_match = low_match;
     cursor->low_bytes = low_bytes;
     cursor->up_match = up_match;
@@ -1695,6 +1741,13 @@ func_exit:
     cursor->rtr_info->mbr_adj = true;
   }
 }
+
+
+
+
+
+
+
 
 /** Searches an index tree and positions a tree cursor on a given level.
 This function will avoid placing latches while traversing the path and so
@@ -2872,9 +2925,9 @@ dberr_t btr_cur_optimistic_insert(
     *rec = page_cur_tuple_insert(page_cursor, entry, index, offsets, heap, mtr);
 
     if (UNIV_UNLIKELY(!*rec)) {
-      ib::fatal(UT_LOCATION_HERE, ER_IB_MSG_44)
-          << "Cannot insert tuple " << *entry << "into index " << index->name
-          << " of table " << index->table->name << ". Max size: " << max_size;
+//      ib::fatal(UT_LOCATION_HERE, ER_IB_MSG_44)
+//          << "Cannot insert tuple " << *entry << "into index " << index->name
+//          << " of table " << index->table->name << ". Max size: " << max_size;
     }
   }
 

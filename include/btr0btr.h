@@ -121,7 +121,7 @@ constexpr size_t BTR_RTREE_UNDO_INS = 131072;
 
 /** In the case of BTR_MODIFY_LEAF, the caller intends to allocate or
 free the pages of externally stored fields. */
-constexpr size_t BTR_MODIFY_EXTERNAL = 262144;
+constexpr size_t BTR_MODIFY_EXTERNAL = 262144;  // 这个字段是用于 blob 处理的
 
 /** Try to delete mark the record at the searched position when the
 record is in spatial index */
