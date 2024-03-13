@@ -1911,7 +1911,7 @@ void btr_cur_open_at_index_side(bool from_left, dict_index_t *index,
   rec_t *node_ptr;
   ulint estimate;
   ulint savepoint;
-  ulint upper_rw_latch, root_leaf_rw_latch;
+  ulint upper_rw_latch /* 访问路径上需要加锁的类型 */, root_leaf_rw_latch;
   btr_intention_t lock_intention;
   buf_block_t *tree_blocks[BTR_MAX_LEVELS];
   ulint tree_savepoints[BTR_MAX_LEVELS];
@@ -1946,6 +1946,7 @@ void btr_cur_open_at_index_side(bool from_left, dict_index_t *index,
 
   savepoint = mtr_set_savepoint(mtr);
 
+  //  加锁的逻辑同 btr_cur_search_to_nth_level 保持一致
   switch (latch_mode) {
     case BTR_CONT_MODIFY_TREE:
     case BTR_CONT_SEARCH_TREE:
@@ -2015,6 +2016,7 @@ void btr_cur_open_at_index_side(bool from_left, dict_index_t *index,
 
     page = buf_block_get_frame(block);
 
+    // 对应根节点同样为叶子节点的情况
     if (height == ULINT_UNDEFINED && btr_page_get_level(page) == 0 &&
         rw_latch != RW_NO_LATCH && rw_latch != root_leaf_rw_latch) {
       /* We should retry to get the page, because the root page
@@ -2038,6 +2040,7 @@ void btr_cur_open_at_index_side(bool from_left, dict_index_t *index,
 
       height = btr_page_get_level(page);
       root_height = height;
+      // 由于该函数不需要进行回溯，这里这里不对 root page 进行缓存
       ut_a(height >= level);
     } else {
       /* TODO: flag the index corrupted if this fails */
@@ -2046,6 +2049,7 @@ void btr_cur_open_at_index_side(bool from_left, dict_index_t *index,
 
     if (height == level) {
       if (srv_read_only_mode) {
+        // 只读模式不需要加锁
         btr_cur_latch_leaves(block, page_id, page_size, latch_mode, cursor,
                              mtr);
       } else if (height == 0) {
@@ -2067,6 +2071,7 @@ void btr_cur_open_at_index_side(bool from_left, dict_index_t *index,
           case BTR_CONT_SEARCH_TREE:
             break;
           default:
+            // 读或仅写 row 的操作，完成搜索后可以释放锁
             if (!s_latch_by_caller) {
               /* Release the tree s-latch */
               mtr_release_s_latch_at_savepoint(mtr, savepoint,
@@ -2079,6 +2084,7 @@ void btr_cur_open_at_index_side(bool from_left, dict_index_t *index,
                                              tree_blocks[n_releases]);
             }
         }
+
       } else { /* height != 0 */
         /* We already have the block latched. */
         ut_ad(latch_mode == BTR_SEARCH_TREE);
@@ -2101,7 +2107,7 @@ void btr_cur_open_at_index_side(bool from_left, dict_index_t *index,
         }
       }
     }
-
+    // 已经找到对应 page，设置 cursor 到对应的 row 上面
     if (from_left) {
       page_cur_set_before_first(block, page_cursor);
     } else {
@@ -2138,7 +2144,7 @@ void btr_cur_open_at_index_side(bool from_left, dict_index_t *index,
     pessimistic delete intention, it might cause node_ptr insert
     for the upper level. We should change the intention and retry.
     */
-    if (latch_mode == BTR_MODIFY_TREE &&
+    if (latch_mode == BTR_MODIFY_TREE && /* 扫描至目标前，提前判断需要加 X 锁 */
         btr_cur_need_opposite_intention(page, lock_intention, node_ptr)) {
       ut_ad(upper_rw_latch == RW_X_LATCH);
       /* release all blocks */
@@ -2159,7 +2165,7 @@ void btr_cur_open_at_index_side(bool from_left, dict_index_t *index,
       continue;
     }
 
-    if (latch_mode == BTR_MODIFY_TREE &&
+    if (latch_mode == BTR_MODIFY_TREE && /* 扫描至目标前，提前判断目前不需要修改页面 */
         !btr_cur_will_modify_tree(cursor->index, page, lock_intention, node_ptr,
                                   node_ptr_max_size, page_size, mtr)) {
       ut_ad(upper_rw_latch == RW_X_LATCH);
@@ -2179,6 +2185,7 @@ void btr_cur_open_at_index_side(bool from_left, dict_index_t *index,
       }
     }
 
+    // 下一层将要访问叶子节点，对访问路径加 X 锁
     if (height == level && latch_mode == BTR_MODIFY_TREE) {
       ut_ad(upper_rw_latch == RW_X_LATCH);
       /* we should sx-latch root page, if released already.
