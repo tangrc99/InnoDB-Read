@@ -845,6 +845,7 @@ void page_cur_open_on_rnd_user_rec(buf_block_t *block, /*!< in: page */
   rnd = (ulint)(page_cur_lcg_prng() % n_recs);
 
   do {
+    // cursor 移动一个 record 的距离
     page_cur_move_to_next(cursor);
   } while (rnd--);
 }

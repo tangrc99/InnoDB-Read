@@ -191,7 +191,9 @@ btr_latch_leaves_t btr_cur_latch_leaves(buf_block_t *block,
   buf_block_t *get_block;
   page_t *page = buf_block_get_frame(block);
   bool spatial;
-  btr_latch_leaves_t latch_leaves = {{nullptr, nullptr, nullptr}, {0, 0, 0}};
+  // 0 位置代表 left sibling 的锁，1 是访问页面的锁，2 是 right sibling 的锁
+  btr_latch_leaves_t latch_leaves = {{nullptr, nullptr, nullptr},
+                                     {0, 0, 0}};
 
   spatial = dict_index_is_spatial(cursor->index) && cursor->rtr_info;
   ut_ad(buf_page_in_file(&block->page));
@@ -200,6 +202,7 @@ btr_latch_leaves_t btr_cur_latch_leaves(buf_block_t *block,
     case BTR_SEARCH_LEAF:
     case BTR_MODIFY_LEAF:
     case BTR_SEARCH_TREE:
+      // 不涉及树结构的变更，如果是修改加 X lock，如果是读取加 S lock
       if (spatial) {
         cursor->rtr_info->tree_savepoints[RTR_MAX_LEVELS] =
             mtr_set_savepoint(mtr);
@@ -219,6 +222,8 @@ btr_latch_leaves_t btr_cur_latch_leaves(buf_block_t *block,
 
       return (latch_leaves);
     case BTR_MODIFY_TREE:
+      // 操作可能造成树结构的改变，这会造成 page id 的变化，为了防止相邻页面同时进行树结构变更；
+      // 需要对相邻的页面都加 X lock
       /* It is exclusive for other operations which calls
       btr_page_set_prev() */
       ut_ad(mtr_memo_contains_flagged(mtr, dict_index_get_lock(cursor->index),
@@ -294,6 +299,7 @@ btr_latch_leaves_t btr_cur_latch_leaves(buf_block_t *block,
 
     case BTR_SEARCH_PREV:
     case BTR_MODIFY_PREV:
+      // 修改页面的左边界，需要对自身和left sibling 加锁
       mode = latch_mode == BTR_SEARCH_PREV ? RW_S_LATCH : RW_X_LATCH;
       /* latch also left sibling */
       rw_lock_s_lock(&block->lock, UT_LOCATION_HERE);
@@ -613,46 +619,10 @@ static bool btr_cur_need_opposite_intention(const page_t *page,
   ut_error;
 }
 
-/** Searches an index tree and positions a tree cursor on a given level.
- NOTE: n_fields_cmp in tuple must be set so that it cannot be compared
- to node pointer page number fields on the upper levels of the tree!
- Note that if mode is PAGE_CUR_LE, which is used in inserts, then
- cursor->up_match and cursor->low_match both will have sensible values.
- If mode is PAGE_CUR_GE, then up_match will a have a sensible value.
 
- If mode is PAGE_CUR_LE , cursor is left at the place where an insert of the
- search tuple should be performed in the B-tree. InnoDB does an insert
- immediately after the cursor. Thus, the cursor may end up on a user record,
- or on a page infimum record. */
-void btr_cur_search_to_nth_level(
-    dict_index_t *index,   /*!< in: index */
-    ulint level,           /*!< in: the tree level of search */
-    const dtuple_t *tuple, /*!< in: data tuple; NOTE: n_fields_cmp in
-                           tuple must be set so that it cannot get
-                           compared to the node ptr page number field! */
-    page_cur_mode_t mode,  /*!< in: PAGE_CUR_L, ...;
-                           Inserts should always be made using
-                           PAGE_CUR_LE to search the position! */
-    ulint latch_mode,      /*!< in: BTR_SEARCH_LEAF, ..., ORed with
-                       at most one of BTR_INSERT, BTR_DELETE_MARK,
-                       BTR_DELETE, or BTR_ESTIMATE;
-                       cursor->left_block is used to store a pointer
-                       to the left neighbor page, in the cases
-                       BTR_SEARCH_PREV and BTR_MODIFY_PREV;
-                       NOTE that if has_search_latch
-                       is != 0, we maybe do not have a latch set
-                       on the cursor page, we assume
-                       the caller uses his search latch
-                       to protect the record! */
-    btr_cur_t *cursor,     /*!< in/out: tree cursor; the cursor page is
-                           s- or x-latched, but see also above! */
-    ulint has_search_latch,
-    /*!< in: info on the latch mode the
-    caller currently has on search system:
-    RW_S_LATCH, or 0 */
-    const char *file, /*!< in: file name */
-    ulint line,       /*!< in: line where called */
-    mtr_t *mtr)       /*!< in: mtr */
+void btr_cur_search_to_nth_level(dict_index_t *index,ulint level,
+    const dtuple_t *tuple,page_cur_mode_t mode,ulint latch_mode,btr_cur_t *cursor,
+    ulint has_search_latch,const char *file,ulint line,mtr_t *mtr)
 {
   page_t *page = nullptr; /* remove warning */
   buf_block_t *block;
@@ -913,7 +883,11 @@ void btr_cur_search_to_nth_level(
   /* We use these modified search modes on non-leaf levels of the
   B-tree. These let us end up in the right B-tree leaf. In that leaf
   we use the original search mode. */
-
+  // @note 对于某些存在的索引值，只有在索引时用相同匹配原则，才能确保查询路径相同
+  //           12
+  //      8          14
+  // 对于上面的路径，如果要查询 12 这个值，那么 < 12 和 > 12 就会分别使用左路径和右路径
+  // 这两者查询得到的 page 也不相同的，就会造成并发问题
   switch (mode) {
     case PAGE_CUR_GE:
       page_mode = PAGE_CUR_L;
@@ -1771,6 +1745,9 @@ void btr_cur_search_to_nth_level_with_no_latch(dict_index_t *index, ulint level,
                                                btr_cur_t *cursor,
                                                const char *file, ulint line,
                                                mtr_t *mtr, bool mark_dirty) {
+  /// 由于该函数没有获取锁，不会与其他线程产生互斥问题，因此有锁版本函数中的一些优化
+  /// 在该函数中都是不必要的。
+
   page_t *page = nullptr; /* remove warning */
   buf_block_t *block;
   ulint height;
@@ -1819,7 +1796,11 @@ void btr_cur_search_to_nth_level_with_no_latch(dict_index_t *index, ulint level,
   /* We use these modified search modes on non-leaf levels of the
   B-tree. These let us end up in the right B-tree leaf. In that leaf
   we use the original search mode. */
-
+  // @note 对于某些存在的索引值，只有在索引时用相同匹配原则，才能确保查询路径相同
+  //           12
+  //      8          14
+  // 对于上面的路径，如果要查询 12 这个值，那么 < 12 和 > 12 就会分别使用左路径和右路径
+  // 这两者查询得到的 page 也不相同的，就会造成并发问题
   switch (mode) {
     case PAGE_CUR_GE:
       page_mode = PAGE_CUR_L;
@@ -2247,6 +2228,9 @@ void btr_cur_open_at_index_side_with_no_latch(bool from_left,
 
   height = ULINT_UNDEFINED;
 
+  /// 由于该函数没有获取锁，不会与其他线程产生互斥问题，因此有锁版本函数中的一些优化
+  /// 在该函数中都是不必要的。
+
   for (;;) {
     buf_block_t *block;
     page_t *page;
@@ -2471,9 +2455,11 @@ bool btr_cur_open_at_rnd_pos(dict_index_t *index, /*!< in: index */
           }
       }
     }
-
+    // 使用 线性全等生成器 PRNG 随机将 cursor 移动到一个位置
+    // cursor 选中的可能为 page 头部
     page_cur_open_on_rnd_user_rec(block, page_cursor);
 
+    // 只有到达叶子节点，才会退出搜寻
     if (height == 0) {
       break;
     }

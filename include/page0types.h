@@ -174,10 +174,10 @@ static_assert(PAGE_ZIP_SSIZE_MAX < (1 << PAGE_ZIP_SSIZE_BITS),
 /* Page cursor search modes; the values must be in this order! */
 enum page_cur_mode_t {
   PAGE_CUR_UNSUPP = 0,
-  PAGE_CUR_G = 1,
-  PAGE_CUR_GE = 2,
-  PAGE_CUR_L = 3,
-  PAGE_CUR_LE = 4,
+  PAGE_CUR_G = 1, // Greater
+  PAGE_CUR_GE = 2, // Greater or equal
+  PAGE_CUR_L = 3, // Less
+  PAGE_CUR_LE = 4, // Less or equal
 
   /*      PAGE_CUR_LE_OR_EXTENDS = 5,*/ /* This is a search mode used in
                                    "column LIKE 'abc%' ORDER BY column DESC";
