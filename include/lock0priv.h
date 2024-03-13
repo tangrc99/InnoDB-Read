@@ -132,7 +132,7 @@ static inline bool lock_mode_is_next_key_lock(ulint mode) {
 static inline bool lock_rec_get_nth_bit(const lock_t *lock, ulint i);
 
 /** Lock struct; protected by lock_sys latches */
-struct lock_t {
+struct lock_t {   /* 表级锁和行级锁都使用该结构体表示，锁存储在trx结构体中 */
   /** transaction owning the lock */
   trx_t *trx;
 

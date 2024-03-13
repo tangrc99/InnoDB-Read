@@ -831,7 +831,7 @@ static inline const lock_t *lock_rec_has_expl(ulint precise_mode,
               lock_mode_stronger_or_eq(lock_get_mode(lock), mode) &&
               (is_on_supremum ||
                (p_implies_q(lock->is_record_not_gap(), is_rec_not_gap) &&
-                p_implies_q(lock->is_gap(), is_gap)))));
+                p_implies_q(lock->is_gap(), is_gap) ) ) ) );
   });
   /* There are no GRANTED locks after the first WAITING lock in the queue. */
   return first == nullptr || first->is_waiting() ? nullptr : first;
@@ -1207,13 +1207,13 @@ lock_t *RecLock::lock_alloc(trx_t *trx, dict_index_t *index, ulint mode,
   if (is_predicate_lock(mode)) {
     rec_lock.n_bits = 8;
 
-    memset(&lock[1], 0x0, 1);
+    memset(&lock[1] /* bitmap of lock */, 0x0, 1);
 
   } else {
     ut_ad(8 * size < UINT32_MAX);
     rec_lock.n_bits = static_cast<uint32_t>(8 * size);
 
-    memset(&lock[1], 0x0, size);
+    memset(&lock[1] /* bitmap of lock */, 0x0, size);
   }
 
   rec_lock.page_id = rec_id.get_page_id();
@@ -1706,6 +1706,9 @@ static inline lock_rec_req_status lock_rec_lock_fast(
     dict_index_t *index,      /*!< in: index of record */
     que_thr_t *thr)           /*!< in: query thread */
 {
+
+  /// 快速路径的判断方法为：页面不存在或仅存在一个锁，该锁与事务保持一致
+
   ut_ad(locksys::owns_page_shard(block->get_page_id()));
   ut_ad(!srv_read_only_mode);
   ut_ad((LOCK_MODE_MASK & mode) != LOCK_S ||
@@ -1730,6 +1733,7 @@ static inline lock_rec_req_status lock_rec_lock_fast(
   lock_rec_req_status status = LOCK_REC_SUCCESS;
 
   if (lock == nullptr) {
+    // 该分支对应的情况为：页面上不存在锁
     if (!impl) {
       RecLock rec_lock(index, block, heap_no, mode);
 
@@ -1742,11 +1746,14 @@ static inline lock_rec_req_status lock_rec_lock_fast(
   } else {
     trx_mutex_enter(trx);
 
-    if (lock_rec_get_next_on_page(lock) != nullptr || lock->trx != trx ||
-        lock->type_mode != (mode | LOCK_REC) ||
+    if (lock_rec_get_next_on_page(lock) != nullptr /* 该页面有其他锁，该锁可能为范围锁*/
+        || lock->trx != trx || lock->type_mode != (mode | LOCK_REC) ||
         lock_rec_get_n_bits(lock) <= heap_no) {
+
       status = LOCK_REC_FAIL;
+
     } else if (!impl) {
+      // 该分支对应的情况为：页面上仅包含一个锁，且该锁的事务、加锁方式、加锁位置与预期一致
       /* If the nth bit of the record lock is already set
       then we do not set a new lock bit, otherwise we do
       set */
@@ -1860,6 +1867,7 @@ static dberr_t lock_rec_lock_slow(bool impl, select_mode sel_mode, ulint mode,
           ? mode | LOCK_REC_NOT_GAP
           : mode;
 
+  // 检查本事务是否已经有保证性更强锁（等级相等或更强 && 范围更大）
   const auto *held_lock = lock_rec_has_expl(checked_mode, block, heap_no, trx);
 
   if (held_lock != nullptr) {
@@ -1958,6 +1966,7 @@ static dberr_t lock_rec_lock(bool impl, select_mode sel_mode, ulint mode,
       return (DB_SUCCESS_LOCKED_REC);
     case LOCK_REC_FAIL:
       return (
+          //
           lock_rec_lock_slow(impl, sel_mode, mode, block, heap_no, index, thr));
     default:
       ut_error;
@@ -5631,7 +5640,7 @@ dberr_t lock_sec_rec_modify_check_and_lock(
   }
   ut_ad(!index->table->is_temporary());
 
-  heap_no = page_rec_get_heap_no(rec);
+  heap_no = page_rec_get_heap_no(rec);  /* heap_no 用来确定行锁的位置 */
 
   /* Another transaction cannot have an implicit lock on the record,
   because when we come here, we already have modified the clustered
@@ -5642,6 +5651,7 @@ dberr_t lock_sec_rec_modify_check_and_lock(
 
     ut_ad(lock_table_has(thr_get_trx(thr), index->table, LOCK_IX));
 
+    // 尝试加 记录X锁
     err = lock_rec_lock(true, SELECT_ORDINARY, LOCK_X | LOCK_REC_NOT_GAP, block,
                         heap_no, index, thr);
 
@@ -6501,6 +6511,10 @@ void lock_trx_alloc_locks(trx_t *trx) {
   trx->mutex. In theory nobody else should use the trx object while it is being
   constructed, but how can we (the lock-sys) "know" about it and why risk? */
   trx_mutex_enter(trx);
+  // 注意这里是按照 REC_LOCK_SIZE 为单位进行分配的一整块内存，析构时只用析构一次。
+  // REC_LOCK_SIZE = sizeof(lock_t) + 256.
+  // 这意味着每个 lock 后都有一部分额外的区域，可以使用 &lock[1] 对这块区域进行寻址，
+  // 这块区域是被用来作为 lock 的 bitmap
   ulint sz = REC_LOCK_SIZE * REC_LOCK_CACHE;
   byte *ptr = reinterpret_cast<byte *>(
       ut::malloc_withkey(UT_NEW_THIS_FILE_PSI_KEY, sz));

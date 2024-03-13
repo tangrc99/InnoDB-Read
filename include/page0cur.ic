@@ -195,7 +195,7 @@ static inline rec_t *page_cur_tuple_insert(page_cur_t *cursor,
   if (!*heap) {
     *heap = mem_heap_create(
         size + (4 + REC_OFFS_HEADER_SIZE + dtuple_get_n_fields(tuple)) *
-                   sizeof **offsets,
+                   (sizeof **offsets) /* unsigned long int */,
         UT_LOCATION_HERE);
   }
 
