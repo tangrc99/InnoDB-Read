@@ -815,7 +815,9 @@ bool mlog_open_and_write_index(mtr_t *mtr, const byte *rec,
 
   log_start = log_ptr;
   log_end = log_ptr + alloc;
-
+  /* 写入日志头，即 type 至 page no 部分
+   * | type | space | page no | log body |
+   * */
   log_ptr = mlog_write_initial_log_record_fast(rec, type, log_ptr, mtr);
 
   uint8_t index_log_version = INDEX_LOG_VERSION_CURRENT;

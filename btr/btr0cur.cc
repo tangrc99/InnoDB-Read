@@ -4345,7 +4345,7 @@ dberr_t btr_cur_del_mark_set_clust_rec(
   ut_ad(buf_block_get_frame(block) == page_align(rec));
   ut_ad(page_is_leaf(page_align(rec)));
 
-  if (rec_get_deleted_flag(rec, rec_offs_comp(offsets))) {
+  if (rec_get_deleted_flag(rec, rec_offs_comp(offsets)) /* 是否已经被本事务删除 */) {
     /* While cascading delete operations, this becomes possible. */
     ut_ad(rec_get_trx_id(rec, index) == thr_get_trx(thr)->id);
     return (DB_SUCCESS);
@@ -4357,7 +4357,7 @@ dberr_t btr_cur_del_mark_set_clust_rec(
   if (err != DB_SUCCESS) {
     return (err);
   }
-
+  // step1. 创建 undo log，获取 roll ptr；写入 undo log 的 redo log
   err =
       trx_undo_report_row_operation(flags, TRX_UNDO_MODIFY_OP, thr, index,
                                     entry, nullptr, 0, rec, offsets, &roll_ptr);
@@ -4371,6 +4371,7 @@ dberr_t btr_cur_del_mark_set_clust_rec(
 
   page_zip = buf_block_get_page_zip(block);
 
+  // step2. 更新删除标志位
   btr_rec_set_deleted_flag(rec, page_zip, true);
 
   /* For intrinsic table, roll-ptr is not maintained as there is no UNDO
@@ -4394,8 +4395,10 @@ dberr_t btr_cur_del_mark_set_clust_rec(
     row_log_table_delete(rec, entry, index, offsets, nullptr);
   }
 
+  // step3. 写入更新的 trx，roll ptr
   row_upd_rec_sys_fields(rec, page_zip, index, offsets, trx, roll_ptr);
 
+  // step4. 写入 redo log，由于 undo log 的 redo 在记录之前，所以能够确保 roll ptr的完整性
   btr_cur_del_mark_set_clust_rec_log(rec, index, trx->id, roll_ptr, mtr);
 
   return (err);
@@ -4495,6 +4498,8 @@ dberr_t btr_cur_del_mark_set_sec_rec(
               unsigned(val), block->page.id.space(), block->page.id.page_no(),
               unsigned(page_rec_get_heap_no(rec)), cursor->index->name(),
               cursor->index->id, trx_get_id_for_print(thr_get_trx(thr))));
+
+  /// 由于次级索引中不存储数据，undo log 只记录数据逻辑，当恢复时根据表的结构可以恢复次级索引
 
   /* We do not need to reserve search latch, as the
   delete-mark flag is being updated in place and the adaptive
@@ -4600,9 +4605,10 @@ bool btr_cur_optimistic_delete_func(btr_cur_t *cursor,
   offsets = rec_get_offsets(rec, cursor->index, offsets, ULINT_UNDEFINED,
                             UT_LOCATION_HERE, &heap);
 
+  /// 乐观删除需要满足两个条件： 1.无外键. 2.删除后不需要压缩页面
   auto no_compress_needed =
       !rec_offs_any_extern(offsets) &&
-      btr_cur_can_delete_without_compress(cursor, rec_offs_size(offsets), mtr);
+      btr_cur_can_delete_without_compress(cursor, rec_offs_size(offsets), mtr) /* !btr_cur_compress_recommendation */;
 
   if (no_compress_needed) {
     page_t *page = buf_block_get_frame(block);

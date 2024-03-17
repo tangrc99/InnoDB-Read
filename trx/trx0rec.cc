@@ -2218,6 +2218,7 @@ dberr_t trx_undo_report_row_operation(
       ut_ad(err == DB_SUCCESS);
       break;
     default:
+      /* 标记删除视为 MODIFY OP */
       ut_ad(op_type == TRX_UNDO_MODIFY_OP);
 
       undo = undo_ptr->update_undo;
@@ -2237,6 +2238,7 @@ dberr_t trx_undo_report_row_operation(
       break;
   }
 
+  // 这里是获取 undo log 使用的页面，而不是修改的页面
   page_no = undo->last_page_no;
   undo_block = buf_page_get_gen(page_id_t(undo->space, page_no),
                                 undo->page_size, RW_X_LATCH, undo->guess_block,
@@ -2251,6 +2253,7 @@ dberr_t trx_undo_report_row_operation(
     undo_page = buf_block_get_frame(undo_block);
     ut_ad(page_no == undo_block->page.id.page_no());
 
+    // 在这一步，undo log 已经被添加至 undo log page，同时写入一个 redo log
     switch (op_type) {
       case TRX_UNDO_INSERT_OP:
         offset = trx_undo_page_report_insert(undo_page, trx, index, clust_entry,
