@@ -55,7 +55,7 @@ static inline void btr_search_info_update(btr_cur_t *cursor) {
   }
 
   const auto hash_analysis_value = ++index->search_info->hash_analysis;
-
+  /// 在同一个索引上 17 次查询到叶节点，才会尝试建立 AHI
   if (hash_analysis_value < BTR_SEARCH_HASH_ANALYSIS) {
     /* Do nothing */
 

@@ -415,7 +415,7 @@ static void btr_search_info_update_hash(btr_cur_t *cursor) {
 
     return;
   }
-
+  // 唯一确定记录的索引数量，例如 (1,1,1)对应 3 ;(1,2) 对应 2
   const uint16_t n_unique =
       static_cast<uint16_t>(dict_index_get_n_unique_in_tree(index));
   const auto info = index->search_info;
@@ -431,10 +431,11 @@ static void btr_search_info_update_hash(btr_cur_t *cursor) {
     specified in the query. */
 
     ut_a(prefix_info.n_fields <= n_unique);
-    ut_ad(cursor->up_match <= n_unique);
-    ut_ad(cursor->low_match <= n_unique);
+    /// (2,1) (2,2) (3,1) cursor=(2) 能覆盖前两个记录的 1 个字段，无法覆盖第三个记录
+    ut_ad(cursor->up_match <= n_unique);  // 查询右边界上，当前索引能覆盖的字段数量
+    ut_ad(cursor->low_match <= n_unique); // 查询左边界上，当前索引能覆盖的字段数量
     if (prefix_info.n_fields == n_unique &&
-        std::max(cursor->up_match, cursor->low_match) == n_unique) {
+        std::max(cursor->up_match, cursor->low_match) == n_unique /* 覆盖索引 */) {
       info->n_hash_potential++;
 
       return;
@@ -455,12 +456,16 @@ static void btr_search_info_update_hash(btr_cur_t *cursor) {
     the left-most record from each group, then up matches, and low not, so that
     up is at the boundary, and would get cached. And the opposite if we cache
     right-most. */
-    const bool low_matches_prefix =
+    const bool low_matches_prefix = /* 左边界覆盖的字段比 cursor更多 */
         0 >= ut_pair_cmp(prefix_info.n_fields, prefix_info.n_bytes,
                          cursor->low_match, cursor->low_bytes);
-    const bool up_matches_prefix =
+    const bool up_matches_prefix = /* 右边界覆盖的字段比 cursor更多 */
         0 >= ut_pair_cmp(prefix_info.n_fields, prefix_info.n_bytes,
                          cursor->up_match, cursor->up_bytes);
+    /// 若AHI索引在边界上，所以如果用户的查询请求落在 AHI 边界中，并且查询成功；
+    /// 则必然有一个匹配索引数量大于 AHI，另外一个则相反。例如对于索引：
+    /// (1,2,3) (1,2,4) (1,2,5); AHI 为(1,2) 匹配为 2，查询为 (1,2,4) 那么其左匹配为 3，右匹配为 2
+    /// 必然满足该条件
     if (prefix_info.left_side ? (!low_matches_prefix && up_matches_prefix)
                               : (low_matches_prefix && !up_matches_prefix)) {
       info->n_hash_potential++;
@@ -482,6 +487,7 @@ static void btr_search_info_update_hash(btr_cur_t *cursor) {
     /* For extra safety, we set some sensible values here */
     info->prefix_info = {0, 1, true};
   } else if (cmp > 0) {
+    // 右侧边界覆盖的字段数更多，对于右侧边界来说，当前 cursor 是 left side
     info->n_hash_potential = 1;
 
     ut_ad(cursor->up_match <= n_unique);
@@ -496,6 +502,7 @@ static void btr_search_info_update_hash(btr_cur_t *cursor) {
                            static_cast<uint16_t>(cursor->low_match), true};
     }
   } else {
+    // 左侧边界覆盖的字段数更多
     info->n_hash_potential = 1;
 
     ut_ad(cursor->low_match <= n_unique);
@@ -543,6 +550,7 @@ static bool btr_search_update_block_hash_info(buf_block_t *block,
 
     block->n_hash_helps++;
   } else {
+    // n_hash_helps 应当被重置
     block->n_hash_helps = 1;
     block->ahi.recommended_prefix_info = info->prefix_info.load();
   }
@@ -624,6 +632,7 @@ static void btr_search_update_hash_ref(buf_block_t *block,
 
     btr_search_check_free_space_in_heap(cursor->index);
 
+    /// 当 AHI 失效时，会重复进入该函数，因为这里不等待锁
     if (!btr_search_x_lock_nowait(cursor->index, UT_LOCATION_HERE)) {
       return;
     }
@@ -634,7 +643,7 @@ static void btr_search_update_hash_ref(buf_block_t *block,
     we check if it still matches the prefix info we used to fold the record. If
     it does not match, we can't add the entry to hash table, as it would never
     be deleted and would corrupt the AHI. */
-    if (btr_search_enabled && block->ahi.index != nullptr) {
+    if (btr_search_enabled && block->ahi.index != nullptr /* 前面是脏读，double check */) {
       ut_ad(block->ahi.index == index);
       if (info->n_hash_potential > 0 &&
           block_prefix_info == block->ahi.prefix_info.load()) {
@@ -656,6 +665,10 @@ void btr_search_info_update_slow(btr_cur_t *cursor) {
   info or block->ahi with any semaphore, to save CPU time!
   We cannot assume the fields are consistent when we return from
   those functions! */
+
+  /// 这个函数里面并没有记录 cursor 访问的位置，这是因为 btr_search_update_block_hash_info
+  /// 还会更新 block 里面的 info，如果是连续以相同前缀访问同一个页面，那么两者之间会产生对应关系；
+  /// 否则，两者无法同步，会重置 block 相关信息，这会导致无法建立AHI。
   btr_search_info_update_hash(cursor);
 
 #ifdef UNIV_SEARCH_PERF_STAT
@@ -674,6 +687,8 @@ void btr_search_info_update_slow(btr_cur_t *cursor) {
     btr_search_update_block_hash_info decided to build the index for this
     block, the record should be hashed correctly with the rest of the block's
     records. */
+    /// 由于 search info 和 page info 是解耦的，所以可能会存在“偶然”建立哈希索引的情况；
+    /// 这种情况能够通过后续的查询发现并更新哈希索引的引用情况
     btr_search_update_hash_ref(block, cursor);
   }
 }
@@ -696,6 +711,7 @@ static bool btr_search_check_guess(btr_cur_t *cursor,
                                    bool can_only_compare_to_cursor_rec,
                                    const dtuple_t *tuple, ulint mode,
                                    mtr_t *mtr) {
+  /// 函数的逻辑非常简单，就是根据 mode 判断 cursor 匹配的 record 是否符合 tuple 的匹配规则
   rec_t *rec;
   ulint match;
 
@@ -804,6 +820,11 @@ static bool btr_search_check_guess(btr_cur_t *cursor,
 bool btr_search_guess_on_hash(const dtuple_t *tuple, ulint mode,
                               ulint latch_mode, btr_cur_t *cursor,
                               ulint has_search_latch, mtr_t *mtr) {
+  /// 该函数的逻辑比较简单，就是通过哈希索引获取记录，然后检查记录是否合适
+  /// 如果通过这种方式命中，会使 potential 计数+5
+  /// 注意由于 AHI 是为了优化读取，所以该操作只会乐观获取锁；获取锁失败，表明有操作正在
+  /// 修改 AHI，该操作可能耗时较久，例如内存池的伸缩，则不使用 AHI
+
   const rec_t *rec;
 #ifdef notdefined
   btr_cur_t cursor2;
@@ -1469,6 +1490,12 @@ static void btr_search_build_page_hash_index(dict_index_t *index,
                prefix_info.n_fields, prefix_info.n_bytes, index_hash, index);
 
   size_t n_cached = 0;
+
+  /// 这一段是在处理前缀哈希，对于一下的聚簇索引：
+  /// (2,1), (2,2), (5, 3), (5, 4), (7, 5), (8, 6)
+  /// left_side == true， 索引为 (2,1),(5,3),(7,5),(8,6)
+  /// left_side == false， 索引为 (2,2),(5,4),(7,5),(8,6)
+
   if (prefix_info.left_side) {
     hashes[n_cached] = hash_value;
     recs[n_cached] = rec;
@@ -1479,6 +1506,7 @@ static void btr_search_build_page_hash_index(dict_index_t *index,
     const auto next_rec = page_rec_get_next(rec);
 
     if (page_rec_is_supremum(next_rec)) {
+      /// 正无穷也会被放入索引值中
       if (!prefix_info.left_side) {
         hashes[n_cached] = hash_value;
         recs[n_cached] = rec;
@@ -1541,7 +1569,7 @@ static void btr_search_build_page_hash_index(dict_index_t *index,
     return;
   }
 
-  /* Before we re-acquired the AHI latch, someone else might have already change
+  /* Before we re-acquired the AHI latch, someone else might have already changed
   them. In case the block is already indexed and the prefix parameters match,
   we will just update all record's entries. */
   if (block->ahi.index && block->ahi.prefix_info.load() != prefix_info) {
@@ -1614,8 +1642,9 @@ void btr_search_update_hash_on_move(buf_block_t *new_block, buf_block_t *block,
   /* Will caching the new_block overwrite outdated entries, that is are the old
   and new block settings matching? And are the old block settings valuable
   enough to keep in cache? */
-  if ((!new_block_index || new_block->ahi.prefix_info.load() == old_settings) &&
-      (recommended_settings == old_settings)) {
+  if ((!new_block_index /* 新页未建立哈希索引 */ ||
+       new_block->ahi.prefix_info.load() == old_settings)  &&
+      (recommended_settings == old_settings) /* 新页还没有被大量访问 */) {
     /* We need to set recommended prefix so it is used by the
     btr_search_build_page_hash_index method. Since we are holding X-latch on
     block->lock, no other thread can modify the recommendation. */
@@ -1705,6 +1734,8 @@ void btr_search_update_hash_node_on_insert(btr_cur_t *cursor) {
 
   const auto prefix_info = block->ahi.prefix_info.load();
 
+  // cursor 使用哈希索引搜索到，原哈希索引使用右边界，并且插入后 prefix info 相同；
+  // 这证明插入后右边界发生改变了（插入永远在右侧），直接变更即可
   if (cursor->flag == BTR_CUR_HASH && !prefix_info.left_side &&
       cursor->ahi.prefix_info.equals_without_left_side(prefix_info)) {
     if (!btr_search_x_lock_nowait(index, UT_LOCATION_HERE)) {
@@ -1729,6 +1760,7 @@ void btr_search_update_hash_node_on_insert(btr_cur_t *cursor) {
     block->ahi.validate();
     btr_search_x_unlock(index);
   } else {
+    // 无法确定哈希索引与插入的位置
     btr_search_update_hash_on_insert(cursor);
   }
 }
@@ -1799,6 +1831,7 @@ void btr_search_update_hash_on_insert(btr_cur_t *cursor) {
         rec_hash(rec, offsets.compute(rec, index, n_offs), prefix_info.n_fields,
                  prefix_info.n_bytes, index_hash, index);
   } else {
+    // 插入位置是无穷小，能够直接确定哈希左边界
     if (prefix_info.left_side) {
       locked = btr_search_x_lock_nowait(index, UT_LOCATION_HERE);
 
@@ -1816,7 +1849,7 @@ void btr_search_update_hash_on_insert(btr_cur_t *cursor) {
     goto check_next_rec;
   }
 
-  if (hash_value != ins_hash) {
+  if (hash_value != ins_hash /* 新插入的记录可能为左边界 */) {
     if (!locked) {
       locked = btr_search_x_lock_nowait(index, UT_LOCATION_HERE);
 
@@ -1837,7 +1870,7 @@ void btr_search_update_hash_on_insert(btr_cur_t *cursor) {
   }
 
 check_next_rec:
-  if (page_rec_is_supremum(next_rec)) {
+  if (page_rec_is_supremum(next_rec) /* 插入记录右侧无数据，必定是右边界*/) {
     if (!prefix_info.left_side) {
       if (!locked) {
         locked = btr_search_x_lock_nowait(index, UT_LOCATION_HERE);
@@ -1857,7 +1890,7 @@ check_next_rec:
     return;
   }
 
-  if (ins_hash != next_hash) {
+  if (ins_hash != next_hash /* ins 是右边界，next 是左边界*/) {
     if (!locked) {
       locked = btr_search_x_lock_nowait(index, UT_LOCATION_HERE);
 

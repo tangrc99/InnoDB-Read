@@ -234,6 +234,10 @@ byte *page_mem_alloc_heap(
 
   ut_ad(page && heap_no);
 
+  /// 一个 page 中含有 free space 和 heap space.
+  /// 前者是已经初始化的内存区域，后者是未初始化的内存区域
+  /// 这里是用 page heap 来做分配
+
   avl_space = page_get_max_insert_size(page, 1);
 
   if (avl_space >= need) {
