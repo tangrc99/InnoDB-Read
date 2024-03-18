@@ -4596,7 +4596,7 @@ bool btr_cur_compress_if_useful(
       return (false);
     }
   }
-
+  // 单页才需要压缩
   return (btr_cur_compress_recommendation(cursor, mtr) &&
           btr_compress(cursor, adjust, mtr));
 }
