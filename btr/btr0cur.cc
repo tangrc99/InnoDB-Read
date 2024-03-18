@@ -2584,7 +2584,7 @@ bool btr_cur_open_at_rnd_pos(dict_index_t *index, /*!< in: index */
   For compressed pages, page_cur_tuple_insert()
   attempted this already. */
   if (!rec && !page_cur_get_page_zip(page_cursor) &&
-      btr_page_reorganize(page_cursor, cursor->index, mtr)) {
+      btr_page_reorganize(page_cursor, cursor->index, mtr) /* 对删除的记录进行清理 */) {
     rec = page_cur_tuple_insert(page_cursor, tuple, cursor->index, offsets,
                                 heap, mtr);
   }
@@ -2621,6 +2621,7 @@ bool btr_cur_open_at_rnd_pos(dict_index_t *index, /*!< in: index */
   ut_ad(!dict_index_is_online_ddl(index) || index->is_clustered() ||
         (flags & BTR_CREATE_FLAG));
 
+  /// step1. 检查并尝试加锁
   /* Check if there is predicate or GAP lock preventing the insertion */
   if (!(flags & BTR_NO_LOCKING_FLAG)) {
     if (dict_index_is_spatial(index)) {
@@ -2644,10 +2645,11 @@ bool btr_cur_open_at_rnd_pos(dict_index_t *index, /*!< in: index */
   }
 
   if (err != DB_SUCCESS || !index->is_clustered() ||
-      dict_index_is_ibuf(index)) {
+      dict_index_is_ibuf(index) /* ibuf和次级键 不用 undo log*/) {
     return (err);
   }
 
+  /// step2. 写 undo log
   err = trx_undo_report_row_operation(flags, TRX_UNDO_INSERT_OP, thr, index,
                                       entry, nullptr, 0, nullptr, nullptr,
                                       &roll_ptr);
@@ -2667,6 +2669,7 @@ bool btr_cur_open_at_rnd_pos(dict_index_t *index, /*!< in: index */
       ut_ad(roll_ptr == (1ULL << 55));
     }
 
+    /// step3. undo的 roll ptr写回上层传入的entry
     row_upd_index_entry_sys_field(entry, index, DATA_ROLL_PTR, roll_ptr);
   }
 
@@ -2732,7 +2735,7 @@ dberr_t btr_cur_optimistic_insert(
   page_t *page;
   rec_t *dummy;
   bool reorg;
-  bool inherit = true;
+  bool inherit = true;  /* 插入成功后是否需要继承间隙锁 */
   ulint rec_size;
   dberr_t err;
 
@@ -2758,11 +2761,16 @@ dberr_t btr_cur_optimistic_insert(
   }
 #endif /* UNIV_DEBUG_VALGRIND */
 
+  /// 乐观插入操作在开始阶段会检查空间以决定是否退化为悲观插入
+  /// 尝试乐观插入失败后，对于内部表直接退化，而一般表则reorg后再次尝试插入
+  /// 退化为悲观插入前，会 prefetch siblings
+
   auto leaf = page_is_leaf(page);
 
   /* Calculate the record size when entry is converted to a record */
   rec_size = rec_get_converted_size(index, entry);
 
+  // 情况有三种：1. rec_size >= REC_MAX_DATA_SIZE 2. 大于可用空间的一半 3. 压缩页空间不足
   if (page_zip_rec_needs_ext(rec_size, page_is_comp(page),
                              dtuple_get_n_fields(entry), page_size)) {
     /* The record is so big that we have to store some fields
@@ -2799,7 +2807,7 @@ dberr_t btr_cur_optimistic_insert(
     /* prefetch siblings of the leaf for the pessimistic
     operation, if the page is leaf. */
     if (page_is_leaf(page)) {
-      btr_cur_prefetch_siblings(block);
+      btr_cur_prefetch_siblings(block); /* 乐观插入失败后会退化为悲观插入 */
     }
   fail_err:
 
@@ -2827,6 +2835,7 @@ dberr_t btr_cur_optimistic_insert(
   we have to split the page to reserve enough free space for
   future updates of records. */
 
+  // 插入记录后页面需要分裂会退化为悲观插入
   if (leaf && !page_size.is_compressed() && index->is_clustered() &&
       page_get_n_recs(page) >= 2 &&
       dict_index_get_space_reserve() + rec_size > max_size &&
@@ -2850,7 +2859,7 @@ dberr_t btr_cur_optimistic_insert(
   {
     const rec_t *page_cursor_rec = page_cur_get_rec(page_cursor);
 
-    if (index->table->is_intrinsic()) {
+    if (index->table->is_intrinsic() /* 临时表不需要并发，记录不转换为 rec 格式 */) {
       *rec = page_cur_tuple_direct_insert(page_cursor, entry, index, mtr,
                                           rec_size);
     } else {
@@ -2881,7 +2890,7 @@ dberr_t btr_cur_optimistic_insert(
       *rec =
           page_cur_tuple_insert(page_cursor, entry, index, offsets, heap, mtr);
     }
-
+    // 当两者不相等时，证明插入失败
     reorg = page_cursor_rec != page_cur_get_rec(page_cursor);
   }
 
@@ -2914,7 +2923,7 @@ dberr_t btr_cur_optimistic_insert(
     ut_ad(page_get_max_insert_size(page, 1) == max_size);
 
     reorg = true;
-
+    /// 释放已删除的记录，再次尝试插入
     *rec = page_cur_tuple_insert(page_cursor, entry, index, offsets, heap, mtr);
 
     if (UNIV_UNLIKELY(!*rec)) {
@@ -2924,6 +2933,7 @@ dberr_t btr_cur_optimistic_insert(
     }
   }
 
+  /// 重组哈希索引
   if (!index->disable_ahi) {
     if (!reorg && leaf && (cursor->flag == BTR_CUR_HASH)) {
       btr_search_update_hash_node_on_insert(cursor);
@@ -3064,6 +3074,7 @@ dberr_t btr_cur_pessimistic_insert(
     /* The page is the root page */
     *rec = btr_root_raise_and_insert(flags, cursor, offsets, heap, entry, mtr);
   } else {
+    /// 关键逻辑函数
     *rec = btr_page_split_and_insert(flags, cursor, offsets, heap, entry, mtr);
   }
 
@@ -3587,6 +3598,9 @@ dberr_t btr_cur_optimistic_update(ulint flags, btr_cur_t *cursor,
        trx_is_recv(thr_get_trx(thr)));
 #endif /* UNIV_DEBUG || UNIV_BLOB_LIGHT_DEBUG */
 
+  /// step1: 检查能够原地进行修改以及能否乐观修改。原地修改的条件有两个，而乐观修改只用满足第一个条件：
+  /// 1.修改不存在外键、blob 等外部值，行大小小于 16kb
+  /// 2.修改不拓展原有行，例如 varchar 的修改
   if (!row_upd_changes_field_size_or_external(index, *offsets, update)) {
     /* The simplest and the most common case: the update does not
     change the size of any field and none of the updated fields is
@@ -3619,6 +3633,8 @@ dberr_t btr_cur_optimistic_update(ulint flags, btr_cur_t *cursor,
              ("update %s (" IB_ID_FMT ") by " TRX_ID_FMT ": %s", index->name(),
               index->id, trx_id, rec_printer(rec, *offsets).str().c_str()));
 
+  /// step2： 在分配的 heap 中，将 upd_t 结构体转换为 record 类型，并检查空间
+
   page_cursor = btr_cur_get_page_cur(cursor);
 
   if (!*heap) {
@@ -3637,6 +3653,7 @@ dberr_t btr_cur_optimistic_update(ulint flags, btr_cur_t *cursor,
   row_upd_index_replace_new_col_vals_index_pos(new_entry, index, update, false,
                                                *heap);
 
+  // 检查是否具有自增的列
   if (!materialize_instant_default(index, rec)) {
     new_entry->ignore_trailing_default(index);
   }
@@ -3713,6 +3730,8 @@ dberr_t btr_cur_optimistic_update(ulint flags, btr_cur_t *cursor,
     goto func_exit;
   }
 
+  /// step3. undo log
+
   /* Do lock checking and undo logging */
   err = btr_cur_upd_lock_and_undo(flags, cursor, *offsets, update, cmpl_info,
                                   thr, mtr, &roll_ptr);
@@ -3729,6 +3748,9 @@ dberr_t btr_cur_optimistic_update(ulint flags, btr_cur_t *cursor,
   if (!dict_table_is_locking_disabled(index->table)) {
     lock_rec_store_on_page_infimum(block, rec);
   }
+
+  /// step3. 更新 1.删除哈希索引 2.删除原记录 3.插入新纪录
+  /// 注意 2 和 3 步都会分别写入日志
 
   btr_search_update_hash_on_delete(cursor);
 

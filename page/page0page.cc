@@ -493,7 +493,7 @@ void page_copy_rec_list_end_no_locks(
   cur2 = page_get_infimum_rec(buf_block_get_frame(new_block));
 
   /* Copy records from the original page to the new page */
-
+  /// 由于可能有标记删除的 page，所以这里是逐记录进行插入操作，而非直接拷贝
   while (!page_cur_is_after_last(&cur1)) {
     rec_t *cur1_rec = page_cur_get_rec(&cur1);
     rec_t *ins_rec;

@@ -1209,6 +1209,7 @@ bool btr_page_reorganize_low(bool recovery, ulint z_level, page_cur_t *cursor,
 #endif /* !UNIV_HOTBACKUP */
 
   /* Copy the old page to temporary space */
+  // 内存拷贝至临时页面
   buf_frame_copy(temp_page, page);
 
 #ifndef UNIV_HOTBACKUP
@@ -1229,6 +1230,7 @@ bool btr_page_reorganize_low(bool recovery, ulint z_level, page_cur_t *cursor,
   /* Copy the records from the temporary space to the recreated page;
   do not copy the lock bits yet */
 
+  // 逐行拷贝回原页面
   page_copy_rec_list_end_no_locks(block, temp_block,
                                   page_get_infimum_rec(temp_page), index, mtr);
 
@@ -1238,6 +1240,7 @@ bool btr_page_reorganize_low(bool recovery, ulint z_level, page_cur_t *cursor,
   for MVCC. */
   if (dict_index_is_sec_or_ibuf(index) && page_is_leaf(page) &&
       !index->table->is_temporary()) {
+    /// 由于当前事务对 temp block 执行了操作，其 trx id 会被更新
     /* Copy max trx id to recreated page */
     trx_id_t max_trx_id = page_get_max_trx_id(temp_page);
     page_set_max_trx_id(block, nullptr, max_trx_id, mtr);
@@ -1284,7 +1287,7 @@ bool btr_page_reorganize_low(bool recovery, ulint z_level, page_cur_t *cursor,
   /* No locks are acquried for intrinsic tables. */
   if (!recovery && !dict_table_is_locking_disabled(index->table)) {
     /* Update the record lock bitmaps */
-    lock_move_reorganize_page(block, temp_block);
+    lock_move_reorganize_page(block, temp_block); /* costly */
   }
 #endif /* !UNIV_HOTBACKUP */
 
