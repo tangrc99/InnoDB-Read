@@ -925,6 +925,7 @@ static inline buf_page_t *buf_page_hash_get_locked(buf_pool_t *buf_pool,
 
   bpage = buf_page_hash_get_low(buf_pool, page_id);
 
+  /// watch page 的 page id 与被 watch 的相同
   if (!bpage || buf_pool_watch_is_sentinel(buf_pool, bpage)) {
     if (!watch) {
       bpage = nullptr;

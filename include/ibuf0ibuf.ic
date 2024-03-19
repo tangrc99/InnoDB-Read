@@ -124,6 +124,7 @@ static inline bool ibuf_should_try(
           !index->is_clustered() && !dict_index_is_spatial(index) &&
           !dict_index_has_desc(index) &&
           index->table->quiesce == QUIESCE_NONE &&
+          /* 删除索引时不需要检查唯一性，而插入时需要检查，因此插入时要求键是唯一的 */
           (ignore_sec_unique || !dict_index_is_unique(index)) &&
           srv_force_recovery < SRV_FORCE_NO_IBUF_MERGE);
 }

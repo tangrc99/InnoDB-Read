@@ -939,7 +939,7 @@ search_loop:
       /* Try to buffer the operation if the leaf
       page is not in the buffer pool. */
 
-      fetch = btr_op == BTR_DELETE_OP ? Page_fetch::IF_IN_POOL_OR_WATCH
+      fetch = (btr_op == BTR_DELETE_OP) ? Page_fetch::IF_IN_POOL_OR_WATCH
                                       : Page_fetch::IF_IN_POOL;
     }
   }
@@ -964,6 +964,9 @@ retry_page_get:
     ut_ad(cursor->thr);
     /// 对插入和删除操作来说，数据可以插入到 ibuf 中，所以使用乐观的方式来获取页面
     /// 当页面不在池中会立刻返回 nullptr，这时候页面正在读取中，线程对ibuf操作就可以了
+    ///
+    /// ibuf 只支持不唯一的次级索引插入，以及删除操作。该条件的判断隐含在 buf_page_get_gen
+    /// 函数中；不满足 ibuf 条件时，该函数不会使用乐观操作，即 block != nullptr
     switch (btr_op) {
       case BTR_INSERT_OP:
       case BTR_INSERT_IGNORE_UNIQUE_OP:
@@ -1017,6 +1020,11 @@ retry_page_get:
 
     /* Insert to the insert/delete buffer did not succeed, we
     must read the page from disk. */
+
+    /// 失败的原因可能有：
+    /// 1. 相关 page 正在被 purge
+    /// 2. page 已经被读到内存里
+    /// 3. ibuf 的配置不匹配
 
     fetch = cursor->m_fetch_mode;
 

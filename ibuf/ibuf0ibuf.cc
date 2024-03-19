@@ -959,6 +959,7 @@ bool ibuf_page_low(const page_id_t &page_id, const page_size_t &page_size,
   ut_ad(!recv_no_ibuf_operations);
   ut_ad(x_latch || mtr == nullptr);
 
+  // fast path
   if (ibuf_fixed_addr_page(page_id, page_size)) {
     return true;
   } else if (page_id.space() != IBUF_SPACE_ID) {
@@ -1000,6 +1001,7 @@ bool ibuf_page_low(const page_id_t &page_id, const page_size_t &page_size,
     mtr_start(mtr);
   }
 
+  // slow path
   bitmap_page = ibuf_bitmap_get_map_page(page_id, page_size, location, mtr);
 
   ret = ibuf_bitmap_page_get_bits(bitmap_page, page_id, page_size,
@@ -1532,6 +1534,7 @@ static dtuple_t *ibuf_entry_build(
                            ULINT_UNDEFINED=not used */
     mem_heap_t *heap)      /*!< in: heap into which to build */
 {
+  /// 这个函数是将 entry 转化为可以插入到 ibuf 中的 entry
   dtuple_t *tuple;
   dfield_t *field;
   const dfield_t *entry_field;
@@ -1691,6 +1694,7 @@ static dtuple_t *ibuf_search_tuple_build(
     page_no_t page_no, /*!< in: index page number */
     mem_heap_t *heap)  /*!< in: heap into which to build */
 {
+  /// ibuf 中非叶节点的记录 (space_id, record marker, page number)
   dtuple_t *tuple;
   dfield_t *field;
   dtype_t fake_type;
@@ -2526,7 +2530,7 @@ static ulint ibuf_get_volume_buffered_count_func(IF_DEBUG(mtr_t *mtr, )
 
   n_fields = rec_get_n_fields_old_raw(rec);
   ut_ad(n_fields > IBUF_REC_FIELD_USER);
-  n_fields -= IBUF_REC_FIELD_USER;
+  n_fields -= IBUF_REC_FIELD_USER;  // ibuf 索引会使用 4 个列
 
   /* nullptr for index as it can't be clustered index */
   rec_get_nth_field_offs_old(nullptr, rec, 1, &len);
@@ -2535,7 +2539,7 @@ static ulint ibuf_get_volume_buffered_count_func(IF_DEBUG(mtr_t *mtr, )
   when the database was started up. */
   ut_a(len == 1);
 
-  if (rec_get_deleted_flag(rec, 0)) {
+  if (rec_get_deleted_flag(rec, 0) /* 指的是 ibuf 中的记录被删除 */) {
     /* This record has been merged already,
     but apparently the system crashed before
     the change was discarded from the buffer.
@@ -2579,7 +2583,7 @@ static ulint ibuf_get_volume_buffered_count_func(IF_DEBUG(mtr_t *mtr, )
     case IBUF_OP_DELETE_MARK:
       /* There must be a record to delete-mark.
       See if this record has been already buffered. */
-      if (n_recs &&
+      if (n_recs && /* 判断当前 key 是否已经记录，hash保存在函数外层，是一个记录表 */
           ibuf_get_volume_buffered_hash(
               rec, types + IBUF_REC_INFO_SIZE, types + len,
               types[IBUF_REC_OFFSET_FLAGS] & IBUF_REC_COMPACT, hash, size)) {
@@ -2667,11 +2671,13 @@ static ulint ibuf_get_volume_buffered(
   /* Count the volume of inserts earlier in the alphabetical order than
   pcur */
 
-  volume = 0;
-
+  volume = 0; // volume 是 ibuf 中 pcursor 对应页面的缓存记录的总长度(in bytes)
+              // n_recs 是去重后，ibuf 中缓冲记录的个数（key 相同算一个，通过 hash 来估计）
   if (n_recs) {
     memset(hash_bitmap, 0, sizeof hash_bitmap);
   }
+
+  /// 计算 pcursor 位置前面相同 (page_no,space) 的范围
 
   rec = pcur->get_rec();
   page = page_align(rec);
@@ -2727,7 +2733,7 @@ static ulint ibuf_get_volume_buffered(
       /* We cannot go to yet a previous page, because we
       do not have the x-latch on it, and cannot acquire one
       because of the latching order: we have to give up */
-
+      /// 这是因为在 fetch 页面时，只会锁住最临近的 siblings
       return (UNIV_PAGE_SIZE);
     }
 
@@ -2739,7 +2745,7 @@ static ulint ibuf_get_volume_buffered(
     volume += ibuf_get_volume_buffered_count(mtr, rec, hash_bitmap,
                                              UT_ARR_SIZE(hash_bitmap), n_recs);
   }
-
+/// 计算 pcursor 位置后面相同 (page_no,space) 的范围
 count_later:
   rec = pcur->get_rec();
 
@@ -2950,6 +2956,10 @@ inline ulint ibuf_get_entry_counter(space_id_t space, page_no_t page_no,
                                     const rec_t *rec,
                                     mtr_t *mtr [[maybe_unused]],
                                     bool exact_leaf) {
+  /// counter 是指记录被写入的序号，这个函数返回的是下一次操作应该使用的 counter，
+  /// 即当前 cursor 的最大 counter + 1
+  /// 很显然，相同的 (space,page_no) 记录的 counter 是递增的，每次插入新纪录都会
+  /// 在记录的最右侧，因此 cursor 对应的就是最大 counter
   return ibuf_get_entry_counter_func(space, page_no, rec,
                                      IF_DEBUG(mtr, ) exact_leaf);
 }
@@ -3019,7 +3029,7 @@ unique or clustered
 #endif
     ibuf_contract(true);
 
-    return (DB_STRONG_FAIL);
+    return (DB_STRONG_FAIL); /* merge 完毕后，对应 page 都在内存中，直接写入页面即可 */
   }
 
   heap = mem_heap_create(1024, UT_LOCATION_HERE);
@@ -3052,7 +3062,7 @@ unique or clustered
       mutex_exit(&ibuf_mutex);
       mutex_exit(&ibuf_pessimistic_insert_mutex);
 
-      if (!ibuf_add_free_page()) {
+      if (!ibuf_add_free_page() /* 尝试从硬盘 map 出页面*/) {
         mem_heap_free(heap);
         return (DB_STRONG_FAIL);
       }
@@ -3072,6 +3082,8 @@ unique or clustered
       &pcur, page_id.space(), page_id.page_no(),
       op == IBUF_OP_DELETE ? &min_n_recs : nullptr, &mtr);
 
+  /// 这里我的理解是，ibuf 必须强保证不会导致 SMO，因为这会导致 page id等出现变化，导致 ibuf
+  /// 中的记录失效。当 ibuf 中记录 < 2时，如果原页面的记录较小，必定会导致SMO，放弃写 ibuf
   if (op == IBUF_OP_DELETE &&
       (min_n_recs < 2 || buf_pool_watch_occurred(page_id))) {
     /* The page could become empty after the record is
@@ -3129,6 +3141,8 @@ unique or clustered
     ulint bits = ibuf_bitmap_page_get_bits(bitmap_page, page_id, page_size,
                                            IBUF_BITMAP_FREE, &bitmap_mtr);
 
+    /// ibuf 页面不够写入 ibuf 记录，插入会导致 page 分裂；这代表 ibuf 缓存同一 key 的数据
+    /// 过多，需要进行 merge
     if (buffered + entry_size + page_dir_calc_reserved_space(1) >
         ibuf_index_page_calc_free_from_bits(page_size, bits)) {
       /* Release the bitmap page latch early. */
@@ -3144,7 +3158,7 @@ unique or clustered
     }
   }
 
-  if (!no_counter) {
+  if (!no_counter /* 表示 ibuf 会缓存删除操作 */) {
     /* Patch correct counter value to the entry to
     insert. This can change the insert position, which can
     result in the need to abort in some cases. */
@@ -3295,6 +3309,7 @@ bool ibuf_insert(ibuf_op_t op, const dtuple_t *entry, dict_index_t *index,
 
   auto no_counter = use <= IBUF_USE_INSERT;
 
+  /// 检查 ibuf 类型与操作是否相匹配，如果成功则跳转至 check_watch
   switch (op) {
     case IBUF_OP_INSERT:
       switch (use) {
@@ -3372,14 +3387,16 @@ check_watch:
 skip_watch:
   entry_size = rec_get_converted_size(index, entry);
 
-  if (entry_size >=
+  if (/* 记录大于页大小的一半，必定会导致页面分裂，不使用缓存 */entry_size >=
       page_get_free_space_of_empty(dict_table_is_comp(index->table)) / 2) {
     return false;
   }
 
+  // BTR_MODIFY_PREV 只会进行乐观插入
   err = ibuf_insert_low(BTR_MODIFY_PREV, op, no_counter, entry, entry_size,
                         index, page_id, page_size, thr);
   if (err == DB_FAIL) {
+    // BTR_MODIFY_TREE 将会进行悲观插入
     err =
         ibuf_insert_low(BTR_MODIFY_TREE | BTR_LATCH_FOR_INSERT, op, no_counter,
                         entry, entry_size, index, page_id, page_size, thr);
