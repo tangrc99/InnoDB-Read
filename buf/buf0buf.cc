@@ -5804,6 +5804,7 @@ static bool sync_read_page_verify_pageid(buf_page_t *bpage, IORequest *type,
   return is_wrong_page_id;
 }
 
+/// 当页面被读取成功时，这个函数会被调用
 bool buf_page_io_complete(buf_page_t *bpage, bool evict, IORequest *type,
                           fil_node_t *node) {
   auto buf_pool = buf_pool_from_bpage(bpage);

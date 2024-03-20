@@ -2058,8 +2058,9 @@ static ulint ibuf_get_merge_page_nos_func(bool contract, const rec_t *rec,
     rec_page_no = ibuf_rec_get_page_no(mtr, rec);
     rec_space_id = ibuf_rec_get_space(mtr, rec);
 
-    if (rec_space_id != first_space_id ||
-        (rec_page_no / IBUF_MERGE_AREA) != (first_page_no / IBUF_MERGE_AREA)) {
+    if (rec_space_id != first_space_id /* 只能 merge 同一个表的插入索引 */ ||
+        (rec_page_no / IBUF_MERGE_AREA) != (first_page_no / IBUF_MERGE_AREA)
+        /* 最多允许 merge 8 个 page 的插入索引*/) {
       break;
     }
 
@@ -2115,19 +2116,24 @@ static ulint ibuf_get_merge_page_nos_func(bool contract, const rec_t *rec,
 #ifdef UNIV_IBUF_DEBUG
     ut_a(*n_stored < IBUF_MAX_N_PAGES_MERGED);
 #endif
+    /// 当前记录的 (space_id,page_no) 与上一条“用户记录”不同，上一条用户记录是某个 page 中
+    /// counter 最大的用户记录
     if ((rec_space_id != prev_space_id || rec_page_no != prev_page_no) &&
         (prev_space_id != 0 || prev_page_no != 0)) {
+
       if (contract ||
           (prev_page_no == first_page_no && prev_space_id == first_space_id) ||
           (volume_for_page > ((IBUF_MERGE_THRESHOLD - 1) * 4 * UNIV_PAGE_SIZE /
                               IBUF_PAGE_SIZE_PER_FREE_SPACE) /
                                  IBUF_MERGE_THRESHOLD)) {
+
+        // 将上一条记录存储下来，作为 contract 位置节点
         space_ids[*n_stored] = prev_space_id;
         page_nos[*n_stored] = prev_page_no;
 
         (*n_stored)++;
 
-        sum_volumes += volume_for_page;
+        sum_volumes += volume_for_page;   /* 记录下这次 contract 的大小*/
       }
 
       if (rec_space_id != first_space_id ||
@@ -2283,6 +2289,7 @@ static ulint ibuf_merge_pages(
   ibuf_mtr_commit(&mtr);
   pcur.close();
 
+  /// 将对应页面读取出来；如果读取过程中发现有失效的 ibuf 记录，则删除这些记录
   buf_read_ibuf_merge_pages(sync, space_ids, page_nos, *n_pages);
 
   return (sum_sizes + 1);
@@ -2293,6 +2300,7 @@ static ulint ibuf_merge_pages(
  @returns number of pages merged.*/
 ulint ibuf_merge_space(space_id_t space) /*!< in: tablespace id to merge */
 {
+  /// 这个函数是将一个 table 对应的 space 页面全部标记 merge
   mtr_t mtr;
   btr_pcur_t pcur;
   mem_heap_t *heap = mem_heap_create(512, UT_LOCATION_HERE);
@@ -3027,6 +3035,8 @@ unique or clustered
 #ifdef UNIV_IBUF_DEBUG
     fputs("Ibuf too big\n", stderr);
 #endif
+    /// 尝试标记可以 merge 的最多 8 个 页面记录；
+    /// 该函数中不会直接执行 merge
     ibuf_contract(true);
 
     return (DB_STRONG_FAIL); /* merge 完毕后，对应 page 都在内存中，直接写入页面即可 */
@@ -3474,7 +3484,7 @@ static rec_t *ibuf_insert_to_index_page_low(
       "InnoDB: is now probably corrupt. Please run CHECK TABLE on\n"
       "InnoDB: that table.\n",
       stderr);
-
+  // for run log
   bitmap_page = ibuf_bitmap_get_map_page(block->page.id, block->page.size,
                                          UT_LOCATION_HERE, mtr);
   old_bits = ibuf_bitmap_page_get_bits(bitmap_page, block->page.id,
@@ -3564,7 +3574,8 @@ static void ibuf_insert_to_index_page(
           dtuple_get_n_fields(entry) * (sizeof(upd_field_t) + sizeof *offsets),
       UT_LOCATION_HERE);
 
-  if (UNIV_UNLIKELY(low_match == dtuple_get_n_fields(entry))) {
+  if (/* 将插入的 page 中有与 ibuf 键完全匹配的记录，需要使用 update 代替 insert */
+      UNIV_UNLIKELY(low_match == dtuple_get_n_fields(entry))) {
     upd_t *update;
     page_zip_des_t *page_zip;
 
@@ -3676,7 +3687,7 @@ static void ibuf_set_del_mark(
 
   low_match = page_cur_search(block, index, entry, &page_cur);
 
-  if (low_match == dtuple_get_n_fields(entry)) {
+  if (low_match == dtuple_get_n_fields(entry) /* 完全匹配才能标记删除 */) {
     rec_t *rec;
     page_zip_des_t *page_zip;
 
@@ -3689,11 +3700,12 @@ static void ibuf_set_del_mark(
     row_ins_sec_index_entry() in a previous invocation of
     row_upd_sec_index_entry(). */
 
-    if (UNIV_LIKELY(
+    if (UNIV_LIKELY(  /* 检查原有记录是否已经删除 */
             !rec_get_deleted_flag(rec, dict_table_is_comp(index->table)))) {
       btr_cur_set_deleted_flag_for_ibuf(rec, page_zip, true, mtr);
     }
   } else {
+    // index page 中不存在对应的记录，ibuf 中标记删除失效
     const page_t *page = page_cur_get_page(&page_cur);
     const buf_block_t *block = page_cur_get_block(&page_cur);
 
@@ -3978,6 +3990,7 @@ want to update a non-existent bitmap page
 void ibuf_merge_or_delete_for_page(buf_block_t *block, const page_id_t &page_id,
                                    const page_size_t *page_size,
                                    bool update_ibuf_bitmap) {
+  /// 这个函数的作用是删除掉 ibuf 中对应 page id 的记录
   mem_heap_t *heap;
   btr_pcur_t pcur;
   dtuple_t *search_tuple;
@@ -4025,8 +4038,9 @@ void ibuf_merge_or_delete_for_page(buf_block_t *block, const page_id_t &page_id,
     }
 
     space = fil_space_acquire_silent(page_id.space());
+    // 检查 table 有效性，以及 ibuf 中是否有相关记录
 
-    if (space == nullptr) {
+    if (space == nullptr /* table not found */) {
       /* Do not try to read the bitmap page from space;
       just delete the ibuf records for the page */
 
@@ -4073,7 +4087,7 @@ void ibuf_merge_or_delete_for_page(buf_block_t *block, const page_id_t &page_id,
     page_zip = buf_block_get_page_zip(block);
 
     if (!fil_page_index_page_check(block->frame) ||
-        !page_is_leaf(block->frame)) {
+        !page_is_leaf(block->frame) /* ibuf 只缓存叶节点的修改记录*/) {
       corruption_noticed = true;
 
       ib::error(ER_IB_MSG_624) << "Corruption in the tablespace. Bitmap"
@@ -4119,6 +4133,7 @@ loop:
   }
 
   if (!pcur.is_on_user_rec()) {
+    // ibuf 中没有对应页面的记录
     ut_ad(pcur.is_after_last_in_tree(&mtr));
 
     goto reset_bit;
@@ -4134,6 +4149,7 @@ loop:
     /* Check if the entry is for this index page */
     if (ibuf_rec_get_page_no(&mtr, rec) != page_id.page_no() ||
         ibuf_rec_get_space(&mtr, rec) != page_id.space()) {
+      // merge or delete is finished
       if (block != nullptr) {
         page_header_reset_last_insert(block->frame, page_zip, &mtr);
       }
@@ -4155,7 +4171,7 @@ loop:
       trx_id_t max_trx_id;
       dict_index_t *dummy_index;
       ibuf_op_t op = ibuf_rec_get_op_type(&mtr, rec);
-
+      /// ibuf 记录插入到 page 中
       max_trx_id = page_get_max_trx_id(page_align(rec));
       page_update_max_trx_id(block, page_zip, max_trx_id, &mtr);
 
@@ -4197,7 +4213,7 @@ loop:
           the server crashes between the following
           mtr_commit() and the subsequent mtr_commit()
           of deleting the change buffer record. */
-
+          /// 将 ibuf 中 DELETE 记录标记为删除，避免重复执行 DELETE merge 导致出现空页面
           btr_cur_set_deleted_flag_for_ibuf(pcur.get_rec(), nullptr, true,
                                             &mtr);
 
@@ -4234,6 +4250,7 @@ loop:
 
       ibuf_dummy_index_free(dummy_index);
     } else {
+      /// block == nullptr，将直接删除 ibuf 中的记录
       dops[ibuf_rec_get_op_type(&mtr, rec)]++;
     }
 
