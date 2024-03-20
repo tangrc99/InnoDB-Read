@@ -3935,6 +3935,7 @@ static bool ibuf_restore_pos(
   Delete-mark the record so that it will not be applied again,
   in case the server crashes before the pessimistic delete is
   made persistent. */
+  /// 将 ibuf 中 DELETE 记录标记为删除，避免重复执行 DELETE merge 导致出现空页面
   btr_cur_set_deleted_flag_for_ibuf(pcur->get_rec(), nullptr, true, mtr);
 
   pcur->store_position(mtr);
