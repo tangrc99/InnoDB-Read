@@ -68,7 +68,7 @@ void btr_pcur_t::store_position(mtr_t *mtr) {
   }
 #endif /* UNIV_DEBUG */
 
-  if (page_is_empty(page)) {
+  if (page_is_empty(page) /* innodb 只允许 root 是空页 */) {
     /* It must be an empty index tree; NOTE that in this case
     we do not store the modify_clock, but always do a search
     if we restore the cursor position */
@@ -113,6 +113,7 @@ void btr_pcur_t::store_position(mtr_t *mtr) {
 }
 
 void btr_pcur_t::copy_stored_position(btr_pcur_t *dst, const btr_pcur_t *src) {
+
   {
     const auto dst_old_rec_buf = dst->m_old_rec_buf;
     const auto dst_buf_size = dst->m_buf_size;
@@ -181,6 +182,7 @@ bool btr_pcur_t::restore_position(ulint latch_mode, mtr_t *mtr,
        latch_mode == BTR_SEARCH_PREV || latch_mode == BTR_MODIFY_PREV) &&
       !m_btr_cur.index->table->is_intrinsic()) {
     /* Try optimistic restoration. */
+    /// 乐观恢复：能够获取之前 block 上面的锁
     if (m_block_when_stored.run_with_hint([&](buf_block_t *hint) {
           return hint != nullptr &&
                  btr_cur_optimistic_latch_leaves(
@@ -230,7 +232,7 @@ bool btr_pcur_t::restore_position(ulint latch_mode, mtr_t *mtr,
   }
 
   /* If optimistic restoration did not succeed, open the cursor anew */
-
+  /// 无法乐观恢复，构建出 tuple 后执行搜索过程
   auto heap = mem_heap_create(256, UT_LOCATION_HERE);
 
   tuple = dict_index_build_data_tuple(index, m_old_rec, m_old_n_fields, heap);

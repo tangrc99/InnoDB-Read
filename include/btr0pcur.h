@@ -532,7 +532,7 @@ inline void btr_pcur_t::open(dict_index_t *index, ulint level,
   if (index->table->is_intrinsic()) {
     ut_ad((latch_mode & BTR_MODIFY_LEAF) || (latch_mode & BTR_SEARCH_LEAF) ||
           (latch_mode & BTR_MODIFY_TREE));
-
+    // 内部表无并发不需要加锁
     btr_cur_search_to_nth_level_with_no_latch(
         index, level, tuple, mode, cur, location.filename, location.line, mtr,
         (((latch_mode & BTR_MODIFY_LEAF) || (latch_mode & BTR_MODIFY_TREE))
