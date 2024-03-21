@@ -402,7 +402,7 @@ struct mtr_t {
   [[nodiscard]] ulint get_savepoint() const {
     ut_ad(is_active());
     ut_ad(m_impl.m_magic_n == MTR_MAGIC_N);
-
+    // savepoint 就是 memo 堆栈的大小，相当于 handle，很容易进行转换
     return (m_impl.m_memo.size());
   }
 

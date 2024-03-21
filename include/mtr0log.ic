@@ -38,7 +38,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "mysqld_error.h"
 
 static inline bool mlog_open(mtr_t *mtr, ulint size, byte *&buffer) {
-  mtr->set_modified();
+  mtr->set_modified();  /* 通常只有写操作才会写入 mlog，因此可认为 mtr 修改了 page */
   return (mlog_open_metadata(mtr, size, buffer));
 }
 
@@ -49,7 +49,7 @@ static inline bool mlog_open_metadata(mtr_t *mtr, ulint size, byte *&buffer) {
     return (false);
   }
 
-  buffer = mtr->get_log()->open(size);
+  buffer = mtr->get_log()->open(size);  /*  创建 size 大小的空间 */
   return (buffer != nullptr);
 }
 

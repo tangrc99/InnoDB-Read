@@ -577,6 +577,7 @@ void mtr_t::start(bool sync) {
   m_impl.m_mtr = this;
   m_impl.m_log_mode = MTR_LOG_ALL;
   m_impl.m_inside_ibuf = false;
+  m_impl.m_inside_ibuf = false;
   m_impl.m_modifications = false;
   m_impl.m_n_log_recs = 0;
   m_impl.m_state = MTR_STATE_ACTIVE;
@@ -665,14 +666,15 @@ void mtr_t::commit() {
 
   Command cmd(this);
 
-  if (has_any_log_record() ||
-      (has_modifications() && m_impl.m_log_mode == MTR_LOG_NO_REDO)) {
+  if (has_any_log_record() /* 产生了 redo log */||
+      (has_modifications() /* 产生了脏页 */&& m_impl.m_log_mode == MTR_LOG_NO_REDO)) {
     ut_ad(!srv_read_only_mode || m_impl.m_log_mode == MTR_LOG_NO_REDO);
 
     cmd.execute();
   } else {
-    cmd.release_all();
-    cmd.release_resources();
+    // 没有产生修改，不需要写入 redo log，直接释放即可
+    cmd.release_all();  // 释放持有的事务信息
+    cmd.release_resources();  // 释放持有的系统资源
   }
 #ifndef UNIV_HOTBACKUP
   check_nolog_and_unmark();
@@ -841,7 +843,7 @@ void mtr_t::Command::execute() {
 #ifndef UNIV_HOTBACKUP
   ulint len = prepare_write();
 
-  if (len > 0) {
+  if (len > 0 /* 开启了 redo log，将 mtr 日志复制到 redo log 中，并 sync */) {
     mtr_write_log_t write_log;
 
     write_log.m_left_to_write = len;
@@ -862,11 +864,12 @@ void mtr_t::Command::execute() {
 
     add_dirty_blocks_to_flush_list(handle.start_lsn, handle.end_lsn);
 
+    // 日志在这里会被 sync 掉
     log_buffer_close(*log_sys, handle);
 
     m_impl->m_mtr->m_commit_lsn = handle.end_lsn;
 
-  } else {
+  } else /* 未开启 redo log，只用将脏页加入 flush list */{
     DEBUG_SYNC_C("mtr_noredo_before_add_dirty_blocks");
 
     add_dirty_blocks_to_flush_list(0, 0);
