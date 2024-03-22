@@ -1743,6 +1743,7 @@ dberr_t trx_undo_assign_undo(
   DBUG_EXECUTE_IF("ib_create_table_fail_too_many_trx",
                   err = DB_TOO_MANY_CONCURRENT_TRXS;
                   goto func_exit;);
+  // 尝试用缓存链表中拿到一个 undo 对象
   undo =
 #ifdef UNIV_DEBUG
       srv_inject_too_many_concurrent_trxs
@@ -1751,7 +1752,7 @@ dberr_t trx_undo_assign_undo(
 #endif
           trx_undo_reuse_cached(rseg, type, trx->id, trx->xid, gtid_storage,
                                 &mtr);
-
+  // 从缓存链表中拿取失败，创建一个 undo 对象
   if (undo == nullptr) {
     err = trx_undo_create(rseg, type, trx->id, trx->xid, gtid_storage, &undo,
                           &mtr);

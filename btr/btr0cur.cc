@@ -3154,6 +3154,7 @@ dberr_t btr_cur_pessimistic_insert(
 
   ut_ad(thr != nullptr || (flags & BTR_NO_LOCKING_FLAG));
 
+  /// undo log 要求修改前的记录，在 update 时 cursor 位于原记录位置，直接拿即可
   rec = btr_cur_get_rec(cursor);
   index = cursor->index;
 

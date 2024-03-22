@@ -203,20 +203,20 @@ static ulint trx_undo_page_set_next_prev_and_add(
   first_free = mach_read_from_2(ptr_to_first_free);
 
   /* Write offset of the previous undo log record */
-  mach_write_to_2(ptr, first_free);
+  mach_write_to_2(ptr, first_free); // prev 指针在 undo record 尾部
   ptr += 2;
 
   end_of_rec = ptr - undo_page;
 
   /* Write offset of the next undo log record */
-  mach_write_to_2(undo_page + first_free, end_of_rec);
+  mach_write_to_2(undo_page + first_free, end_of_rec);  // next 指针在 undo record 头部
 
   /* Update the offset to first free undo record */
-  mach_write_to_2(ptr_to_first_free, end_of_rec);
+  mach_write_to_2(ptr_to_first_free, end_of_rec); // 修改 free 指针
 
   /* Write this log entry to the UNDO log */
   trx_undof_page_add_undo_rec_log(undo_page, first_free, end_of_rec, mtr);
-
+  // 这里已经将 undo log 的放入到了 mlog 中
   return (first_free);
 }
 
@@ -492,7 +492,7 @@ static ulint trx_undo_page_report_insert(
   ut_ad(index->is_clustered());
   ut_ad(mach_read_from_2(undo_page + TRX_UNDO_PAGE_HDR + TRX_UNDO_PAGE_TYPE) ==
         TRX_UNDO_INSERT);
-
+  // 从 undo page 中拿到一个空闲的区域用作插入起始点
   first_free =
       mach_read_from_2(undo_page + TRX_UNDO_PAGE_HDR + TRX_UNDO_PAGE_FREE);
   ptr = undo_page + first_free;
@@ -506,7 +506,7 @@ static ulint trx_undo_page_report_insert(
   }
 
   /* Reserve 2 bytes for the pointer to the next undo log record */
-  ptr += 2;
+  ptr += 2; // undo record 头部是 next 指针，只有当下一个 undo record 插入时才能被确认
 
   /* Store first some general parameters to the undo log */
   *ptr++ = TRX_UNDO_INSERT_REC;
@@ -515,7 +515,7 @@ static ulint trx_undo_page_report_insert(
   /*----------------------------------------*/
   /* Store then the fields required to uniquely determine the record
   to be inserted in the clustered index */
-
+  /// 插入类型 undo log 只需要记录下修改了索引即可；这样在回滚时可以清理对应的索引
   for (i = 0; i < dict_index_get_n_unique(index); i++) {
     const dfield_t *field = dtuple_get_nth_field(clust_entry, i);
     ulint flen = dfield_get_len(field);
@@ -542,7 +542,7 @@ static ulint trx_undo_page_report_insert(
       return (0);
     }
   }
-
+  // 为了在 undo page 中形成 undo log 链表，在这里修改相关指针
   return (trx_undo_page_set_next_prev_and_add(undo_page, ptr, mtr));
 }
 
@@ -855,6 +855,7 @@ static inline byte *trx_undo_page_report_modify_ext(
     trx_t *trx, dict_index_t *index, byte *ptr, byte *ext_buf, ulint prefix_len,
     const page_size_t &page_size, const byte **field, ulint *len,
     bool is_sdi [[maybe_unused]], spatial_status_t spatial_status) {
+
   return trx_undo_page_report_modify_ext_func(
       trx, index, ptr, ext_buf, prefix_len, page_size, field, len,
       IF_DEBUG(is_sdi, ) spatial_status);
@@ -1263,6 +1264,7 @@ static ulint trx_undo_page_report_modify(
   }
   ptr += mach_u64_write_compressed(ptr, trx_id);
 
+  /// 从原记录中读取得到原记录对应的 undo log
   field = rec_get_nth_field(nullptr, rec, offsets,
                             index->get_sys_col_pos(DATA_ROLL_PTR), &flen);
   ut_ad(flen == DATA_ROLL_PTR_LEN);
@@ -1326,6 +1328,8 @@ static ulint trx_undo_page_report_modify(
       }
     }
 
+    /// Update fields 部分
+    // 1. fields count
     ptr += mach_write_compressed(ptr, n_updated);
 
     for (i = 0; i < upd_get_n_fields(update); i++) {
@@ -1334,7 +1338,7 @@ static ulint trx_undo_page_report_modify(
       bool is_virtual = upd_fld_is_virtual_col(fld);
       bool is_multi_val = upd_fld_is_multi_value_col(fld);
       ulint max_v_log_len = 0;
-
+      // 2. fields number
       ulint pos = fld->field_no;
 
       /* Write field number to undo log */
@@ -1364,6 +1368,7 @@ static ulint trx_undo_page_report_modify(
       } else {
         ptr += mach_write_compressed(ptr, pos);
       }
+      // 3. fields length
 
       /* Save the old value of field */
       if (is_virtual) {
@@ -1419,7 +1424,7 @@ static ulint trx_undo_page_report_modify(
       } else if (!is_multi_val) {
         ptr += mach_write_compressed(ptr, flen);
       }
-
+      // 4. fields content
       if (is_multi_val) {
         bool suc = trx_undo_store_multi_value(undo_page, fld->old_v_val, &ptr);
         if (!suc) {
@@ -1430,7 +1435,7 @@ static ulint trx_undo_page_report_modify(
           return 0;
         }
 
-        ut_memcpy(ptr, field, flen);
+        ut_memcpy(ptr, field, flen);  // copy content
         ptr += flen;
 
         if (!is_virtual && rec_offs_nth_extern(index, offsets, pos)) {
@@ -2083,6 +2088,7 @@ static bool trx_undo_erase_page_end(
     page_t *undo_page, /*!< in/out: undo page whose end to erase */
     mtr_t *mtr)        /*!< in/out: mini-transaction */
 {
+  /// 这个函数将 undo page 最后一个没有提交的 undo record 删除掉
   ulint first_free;
 
   first_free =
@@ -2273,7 +2279,7 @@ dberr_t trx_undo_report_row_operation(
       version the replicate page constructed using the log
       records stays identical to the original page */
 
-      if (!trx_undo_erase_page_end(undo_page, &mtr)) {
+      if (!trx_undo_erase_page_end(undo_page, &mtr) /* 删除写一半的 undo */) {
         /* The record did not fit on an empty
         undo page. Discard the freshly allocated
         page and return an error. */
@@ -2317,7 +2323,10 @@ dberr_t trx_undo_report_row_operation(
       trx->undo_rseg_space = undo_ptr->rseg->space_id;
 
       mutex_exit(&trx->undo_mutex);
-
+      // 这里构建的 roll ptr 指向本次创建出的 undo record，会保存两份记录，分别位于：
+      // 1. trx 中，用户可直接进行回滚
+      // 2. rec 中，下次构建 undo log 用于构建版本链表
+      // 上一条记录的 roll ptr已经在构建 undo record 时保存在 undo 中。
       *roll_ptr =
           trx_undo_build_roll_ptr(op_type == TRX_UNDO_INSERT_OP,
                                   undo_ptr->rseg->space_id, page_no, offset);
@@ -2341,6 +2350,7 @@ dberr_t trx_undo_report_row_operation(
     counterpart of the tree latch, which is the rseg mutex. */
 
     undo_ptr->rseg->latch();
+    /// 当前 page 已经写满，尝试新加一个 undo page；这是新版本 innodb 的动态扩容特性
     undo_block = trx_undo_add_page(trx, undo, undo_ptr, &mtr);
     undo_ptr->rseg->unlatch();
 
@@ -2386,7 +2396,7 @@ err_exit:
   const page_t *undo_page;
   bool is_insert;
   mtr_t mtr;
-
+  /// 根据 roll ptr 来进行寻址，然后将 undo record 拷贝出来
   trx_undo_decode_roll_ptr(roll_ptr, &is_insert, &rseg_id, &page_no, &offset);
   space_id = trx_rseg_id_to_space_id(rseg_id, is_temp);
 
@@ -2427,7 +2437,7 @@ err_exit:
   bool missing_history;
 
   rw_lock_s_lock(&purge_sys->latch, UT_LOCATION_HERE);
-
+  // 判断 trx id 对应的 undo 是否已经被 purge 了
   missing_history = purge_sys->view.changes_visible(trx_id, name);
   if (!missing_history) {
     *undo_rec = trx_undo_get_undo_rec_low(roll_ptr, heap, is_temp);
@@ -2472,7 +2482,7 @@ bool trx_undo_prev_version_build(
         mtr_memo_contains_page(index_mtr, index_rec, MTR_MEMO_PAGE_X_FIX));
   ut_ad(rec_offs_validate(rec, index, offsets));
   ut_a(index->is_clustered());
-
+  /// step1. 从最新记录中拿出 roll ptr
   roll_ptr = row_get_rec_roll_ptr(rec, index, offsets);
 
   *old_vers = nullptr;
@@ -2489,7 +2499,7 @@ bool trx_undo_prev_version_build(
   bool is_temp = index->table->is_temporary();
 
   ut_ad(!index->table->skip_alter_undo);
-
+  /// step2. 根据 roll ptr找到 trx 对应的 undo log
   if (trx_undo_get_undo_rec(roll_ptr, rec_trx_id, heap, is_temp,
                             index->table->name, &undo_rec)) {
     if (v_status & TRX_UNDO_PREV_IN_PURGE) {
@@ -2512,7 +2522,7 @@ bool trx_undo_prev_version_build(
     now-dropped old table (table_id). */
     return true;
   }
-
+  /// step3. 找到 undo log 中存储的上一个 undo record 对应的 roll ptr
   ptr = trx_undo_update_rec_get_sys_cols(ptr, &trx_id, &roll_ptr, &info_bits);
 
   /* (a) If a clustered index record version is such that the
@@ -2538,11 +2548,12 @@ bool trx_undo_prev_version_build(
   dereferencing any BLOB pointers. */
 
   ptr = trx_undo_rec_skip_row_ref(ptr, index);
-
+  /// step4. 找到上一条 undo record
   ptr = trx_undo_update_rec_get_update(ptr, index, type, trx_id, roll_ptr,
                                        info_bits, heap, &update, lob_undo,
                                        type_cmpl);
   ut_a(ptr);
+  /// step5. 根据条件构造 old version record
 
   if (row_upd_changes_field_size_or_external(index, offsets, update)) {
     /* We should confirm the existence of disowned external data,
@@ -2606,6 +2617,7 @@ bool trx_undo_prev_version_build(
     row_upd_rec_in_place(*old_vers, index, offsets, update, nullptr);
   }
 
+  /// step6. 如果有必要，构造之前的 vrow
   /* Set the old value (which is the after image of an update) in the
   update vector to dtuple vrow */
   if (v_status & TRX_UNDO_GET_OLD_V_VALUE) {

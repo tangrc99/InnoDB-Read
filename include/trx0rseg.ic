@@ -88,7 +88,7 @@ static inline page_no_t trx_rsegf_get_nth_undo(
     mtr_t *mtr)         /*!< in: mtr */
 {
   ut_a(n < TRX_RSEG_N_SLOTS);
-
+  // 每一个 SLOT 都对应一个 undo page
   return (mtr_read_ulint(rsegf + TRX_RSEG_UNDO_SLOTS + n * TRX_RSEG_SLOT_SIZE,
                          MLOG_4BYTES, mtr));
 }
