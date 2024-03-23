@@ -201,7 +201,9 @@ static ulint trx_undo_page_set_next_prev_and_add(
   ptr_to_first_free = undo_page + TRX_UNDO_PAGE_HDR + TRX_UNDO_PAGE_FREE;
 
   first_free = mach_read_from_2(ptr_to_first_free);
-
+  /// 这里是逻辑是每写入一条 undo record，在这个 record 的尾部保留两个 2 字节的位置；
+  /// 这个位置写入本条 undo record 的起始位置。
+  /// 在写入下一个 undo record 的时候，prev ptr 已经是写好了的。
   /* Write offset of the previous undo log record */
   mach_write_to_2(ptr, first_free); // prev 指针在 undo record 尾部
   ptr += 2;

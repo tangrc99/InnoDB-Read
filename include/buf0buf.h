@@ -440,6 +440,7 @@ buf_block_t *buf_page_get_gen(const page_id_t &page_id,
 inline buf_block_t *buf_page_get(const page_id_t &id, const page_size_t &size,
                                  ulint latch, ut::Location location,
                                  mtr_t *mtr) {
+  /// 函数为阻塞函数
   return buf_page_get_gen(id, size, latch, nullptr, Page_fetch::NORMAL,
                           location, mtr);
 }

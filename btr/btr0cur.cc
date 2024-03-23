@@ -1552,7 +1552,7 @@ retry_page_get:
       }
     }
 
-    // 从这里拿出下一个需要访问的节点，然后继续进行搜索
+    // 从这里拿出下一个需要访问的节点，然后继续进行搜索，注意拿的是 page id 而不是物理地址
     /* Go to the child node */
     page_id.reset(space, btr_node_ptr_get_child_page_no(node_ptr, offsets));
 

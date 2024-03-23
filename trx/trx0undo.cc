@@ -174,7 +174,7 @@ static trx_undo_rec_t *trx_undo_get_prev_rec_from_prev_page(
   const page_size_t &page_size = fil_space_get_page_size(space, &found);
 
   ut_ad(found);
-
+  // 通过 page id 的方式来找到 prev page，阻塞
   buf_block_t *block =
       buf_page_get(page_id_t(space, prev_page_no), page_size,
                    shared ? RW_S_LATCH : RW_X_LATCH, UT_LOCATION_HERE, mtr);

@@ -208,7 +208,7 @@ static inline trx_undo_rec_t *trx_undo_page_get_prev_rec(
   if (start + undo_page == rec) {
     return (nullptr);
   }
-
+  // prev ptr 在 rec 开始前的两个字节处
   return (undo_page + mach_read_from_2(rec - 2));
 }
 
@@ -227,9 +227,9 @@ static inline trx_undo_rec_t *trx_undo_page_get_next_rec(
   undo_page = (page_t *)ut_align_down(rec, UNIV_PAGE_SIZE);
 
   end = trx_undo_page_get_end(undo_page, page_no, offset);
-
+  /// next record 在记录开始的地方
   next = mach_read_from_2(rec);
-
+  /// 判断是否还有记录
   if (next == end) {
     return (nullptr);
   }
@@ -250,11 +250,11 @@ static inline trx_undo_rec_t *trx_undo_page_get_last_rec(
 
   start = trx_undo_page_get_start(undo_page, page_no, offset);
   end = trx_undo_page_get_end(undo_page, page_no, offset);
-
+  /// 需要判断一下是否是空页
   if (start == end) {
     return (nullptr);
   }
-
+  /// page 中含有一个多级链表结构，中间包含 end 指针
   return (undo_page + mach_read_from_2(undo_page + end - 2));
 }
 
