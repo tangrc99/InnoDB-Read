@@ -1968,7 +1968,7 @@ void trx_undo_insert_cleanup(trx_undo_ptr_t *undo_ptr, bool noredo) {
   ut_ad(noredo == fsp_is_system_temporary(rseg->space_id));
 
   rseg->latch();
-
+  /// 清除相关信息，如果之前是从 cached list 拿的则归还，否则直接释放
   UT_LIST_REMOVE(rseg->insert_undo_list, undo);
   undo_ptr->insert_undo = nullptr;
 

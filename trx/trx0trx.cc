@@ -256,8 +256,7 @@ struct TrxFactory {
     allocated object. trx_t objects are allocated by
     ut::zalloc_withkey() in Pool::Pool() which would not call
     the constructors of the trx_t members. */
-    new (trx) trx_t();
-
+    new (trx) trx_t();  /// 默认构造函数里面可能会调用其他复杂结构体的构造函数
     trx_init(trx);
 
     trx->state.store(TRX_STATE_NOT_STARTED, std::memory_order_relaxed);
@@ -525,6 +524,7 @@ trx_t *trx_allocate_for_background(void) {
 /** Creates a transaction object for MySQL.
  @return own: transaction object */
 trx_t *trx_allocate_for_mysql(void) {
+  /// trx 的其余参数会在其他函数中被初始化
   trx_t *trx;
 
   trx = trx_allocate_for_background();
@@ -1391,6 +1391,8 @@ static void trx_start_low(
 
   if (!trx->read_only &&
       (trx->mysql_thd == nullptr || read_write || trx->ddl_operation)) {
+
+    /// 写事务需要分配一个 undo log slot
     trx_assign_rseg_durable(trx);
 
     /* Temporary rseg is assigned only if the transaction
@@ -1417,6 +1419,7 @@ static void trx_start_low(
     trx_sys_rw_trx_add(trx);
 
   } else {
+    /// 只读事务的 id 为 0，但是创建临时表的只读事务仍需要分配 trx id
     trx->id = 0;
 
     if (!trx_is_autocommit_non_locking(trx)) {
@@ -1956,16 +1959,15 @@ static void trx_commit_in_memory(
     const mtr_t *mtr, /*!< in: mini-transaction of
                       trx_write_serialisation_history(), or NULL if
                       the transaction did not modify anything */
-    bool serialised)
-/*!< in: true if serialisation log was
-written */
+    bool serialised   /*!< in: true if serialisation log was
+                      written */)
 {
   ut_ad(trx_can_be_handled_by_current_thread_or_is_hp_victim(trx));
 
   trx->must_flush_log_later = false;
   trx->ddl_must_flush = false;
 
-  if (trx_is_autocommit_non_locking(trx)) {
+  if (trx_is_autocommit_non_locking(trx) /* SELECT 语句事务*/) {
     ut_ad(trx->id == 0);
     ut_ad(trx->read_only);
     ut_a(!trx->is_recovered);
@@ -2064,6 +2066,7 @@ written */
 
     lsn_t lsn = mtr->commit_lsn();
 
+    /// 根据设置，将 trx 对应的 redo log 全部写入硬盘
     if (lsn == 0) {
       /* Nothing to be done. */
     } else if (trx->flush_log_later) {
@@ -2142,6 +2145,7 @@ written */
   hold for recovered transactions or system transactions. */
   assert_trx_is_free(trx);
 
+  /// 注意事务在提交之后就会被 init，而不是事务拿出的时候
   trx_init(trx);
 
   trx_mutex_exit(trx);
@@ -2158,7 +2162,7 @@ void trx_commit_low(trx_t *trx, mtr_t *mtr) {
   ut_ad(!trx_state_eq(trx, TRX_STATE_COMMITTED_IN_MEMORY));
   ut_ad(!mtr || mtr->is_active());
   /* undo_no is non-zero if we're doing the final commit. */
-  if (trx->fts_trx != nullptr && trx->undo_no != 0 &&
+  if (trx->fts_trx != nullptr /* full text trx */ && trx->undo_no != 0 &&
       trx->lock.que_state != TRX_QUE_ROLLING_BACK) {
     dberr_t error;
 
@@ -2182,11 +2186,12 @@ void trx_commit_low(trx_t *trx, mtr_t *mtr) {
 
   bool serialised;
 
-  if (mtr != nullptr) {
+  if (mtr != nullptr /* 写事务 */) {
     mtr->set_sync();
 
     DEBUG_SYNC_C("trx_sys_before_assign_no");
 
+    /// 这里会获取 trx 提交时的 id，并尝试将 undo log 通知给 purge thread
     serialised = trx_write_serialisation_history(trx, mtr);
 
     /* The following call commits the mini-transaction, making the
@@ -2241,6 +2246,11 @@ void trx_commit_low(trx_t *trx, mtr_t *mtr) {
   }
 #endif
 
+  /// 1. 读事务清理 read view
+  /// 2. 写事务清理 undo log
+  /// 3. 写事务根据设置 flush redo log
+  /// 4. 事务清理 save point
+  /// 5. 事务初始化
   trx_commit_in_memory(trx, mtr, serialised);
 }
 
@@ -3380,7 +3390,7 @@ void trx_start_if_not_started_low(trx_t *trx, bool read_write) {
       return;
 
     case TRX_STATE_ACTIVE:
-
+      /// 检查只读事务是否需要读写临时表
       if (read_write && trx->id == 0 && !trx->read_only) {
         trx_set_rw_mode(trx);
       }
