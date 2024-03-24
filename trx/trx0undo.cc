@@ -417,6 +417,8 @@ static void trx_undo_page_init(
   if (!srv_inject_too_many_concurrent_trxs)
 #endif
   {
+    /// InnoDB 中 undo 段数目是固定的，每一个undo header page 都对应 rseg header page
+    /// 中存储的一个 slot
     slot_no = trx_rsegf_undo_find_free(rseg_hdr, mtr);
   }
   if (slot_no == ULINT_UNDEFINED) {
@@ -460,7 +462,7 @@ static void trx_undo_page_init(
                    TRX_UNDO_SEG_HDR + TRX_UNDO_SEG_HDR_SIZE, MLOG_2BYTES, mtr);
 
   mlog_write_ulint(seg_hdr + TRX_UNDO_LAST_LOG, 0, MLOG_2BYTES, mtr);
-
+  /// 完成创建后，需要将 page 加入到 undo page 链表以及对应的 slot 中
   flst_init(seg_hdr + TRX_UNDO_PAGE_LIST, mtr);
 
   flst_add_last(seg_hdr + TRX_UNDO_PAGE_LIST, page_hdr + TRX_UNDO_PAGE_NODE,
@@ -944,7 +946,7 @@ buf_block_t *trx_undo_add_page(
 
   header_page = trx_undo_page_get(page_id_t(undo->space, undo->hdr_page_no),
                                   undo->page_size, mtr);
-
+  /// InnoDB 对单个 undo segment 中包含的 undo page 个数没有要求，只要不超过系统的上限即可
   if (!fsp_reserve_free_extents(&n_reserved, undo->space, 1, FSP_UNDO, mtr)) {
     return (nullptr);
   }
@@ -1561,10 +1563,10 @@ void trx_undo_mem_free(trx_undo_t *undo) /*!< in: the undo object to be freed */
   }
 
   rseg->incr_curr_size();
-
+  /// 拿到管理 undo segment 的数据页
   rseg_header =
       trx_rsegf_get(rseg->space_id, rseg->page_no, rseg->page_size, mtr);
-
+  /// 尝试创建 undo header page，该 page 被 rseg_header 管理
   auto err = trx_undo_seg_create(rseg, rseg_header, type, &id, &undo_page, mtr);
 
   if (err != DB_SUCCESS) {
@@ -1581,7 +1583,7 @@ void trx_undo_mem_free(trx_undo_t *undo) /*!< in: the undo object to be freed */
   if (type != TRX_UNDO_UPDATE) {
     gtid_storage = trx_undo_t::Gtid_storage::NONE;
   }
-
+  /// 每个 undo segment 被一个事务拥有，填入相关信息，并创建对应的内存结构体
   trx_undo_header_add_space_for_xid(undo_page, undo_page + offset, mtr,
                                     gtid_storage);
 
@@ -1752,7 +1754,7 @@ dberr_t trx_undo_assign_undo(
 #endif
           trx_undo_reuse_cached(rseg, type, trx->id, trx->xid, gtid_storage,
                                 &mtr);
-  // 从缓存链表中拿取失败，创建一个 undo 对象
+  // 从缓存链表中拿取失败，创建一个 undo segment header page，该 page 被映射到硬盘上
   if (undo == nullptr) {
     err = trx_undo_create(rseg, type, trx->id, trx->xid, gtid_storage, &undo,
                           &mtr);
