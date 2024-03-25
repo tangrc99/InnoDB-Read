@@ -1532,6 +1532,8 @@ static bool trx_serialisation_number_get(
   produce events when a rollback segment is empty. */
   if ((redo_rseg != nullptr && redo_rseg->last_page_no == FIL_NULL) ||
       (temp_rseg != nullptr && temp_rseg->last_page_no == FIL_NULL)) {
+    /// 这里是一个 fast path，通过检查当前 rseg history 是否为空，
+    /// 直接将记录放入到 purge_queue 中
     TrxUndoRsegs elem;
 
     if (redo_rseg != nullptr && redo_rseg->last_page_no == FIL_NULL) {
@@ -1553,6 +1555,7 @@ static bool trx_serialisation_number_get(
     mutex_exit(&purge_sys->pq_mutex);
 
   } else {
+    /// slow path 当前 update undo 对应 history 链表不为空，无法直接放入 purge_queue
     added_trx_no = trx_add_to_serialisation_list(trx);
   }
 
@@ -1643,7 +1646,7 @@ static bool trx_write_serialisation_history(
       /* Set flag if GTID information need to persist. */
       auto undo_ptr = &trx->rsegs.m_redo;
       trx_undo_gtid_set(trx, undo_ptr->update_undo, false);
-
+      /// 将 update undo 放入 history 链表，然后清理内存结构体
       trx_undo_update_cleanup(trx, undo_ptr, undo_hdr_page, update_rseg_len,
                               (update_rseg_len ? 1 : 0), mtr);
     }
@@ -1657,7 +1660,7 @@ static bool trx_write_serialisation_history(
           trx->rsegs.m_noredo.update_undo, &temp_mtr);
 
       ulint n_added_logs = (redo_rseg_undo_ptr != nullptr) ? 2 : 1;
-
+      /// 将 update undo 放入 history 链表，然后清理内存结构体
       trx_undo_update_cleanup(trx, &trx->rsegs.m_noredo, undo_hdr_page, true,
                               n_added_logs, &temp_mtr);
     }
@@ -2028,6 +2031,8 @@ static void trx_commit_in_memory(
   gtid_persistor.set_persist_gtid(trx, false);
 
   if (mtr != nullptr) {
+    /// 这里直接清理 insert undo，因为 insert 不会用于 MVCC;
+    /// update undo 已经提前被清理掉了
     if (trx->rsegs.m_redo.insert_undo != nullptr) {
       trx_undo_insert_cleanup(&trx->rsegs.m_redo, false);
     }
@@ -2191,7 +2196,7 @@ void trx_commit_low(trx_t *trx, mtr_t *mtr) {
 
     DEBUG_SYNC_C("trx_sys_before_assign_no");
 
-    /// 这里会获取 trx 提交时的 id，并尝试将 undo log 通知给 purge thread
+    /// 这里会获取 trx 提交时的 id，并尝试将 update undo log 通知给 purge thread
     serialised = trx_write_serialisation_history(trx, mtr);
 
     /* The following call commits the mini-transaction, making the
@@ -2416,7 +2421,7 @@ que_thr_t *trx_commit_step(que_thr_t *thr) /*!< in: query thread */
 
     ut_a(trx->lock.wait_thr == nullptr);
     ut_a(trx->lock.que_state != TRX_QUE_LOCK_WAIT);
-
+    /// 检查事务状态，如果没有获取锁，则线程需要进入 SUSPEND 状态
     trx_commit_or_rollback_prepare(trx);
 
     trx->lock.que_state = TRX_QUE_COMMITTING;

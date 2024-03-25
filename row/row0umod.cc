@@ -1283,7 +1283,7 @@ dberr_t row_undo_mod(undo_node_t *node, /*!< in: row undo node */
   ut_ad(thr_get_trx(thr) == node->trx);
 
   THD *thd = dd_thd_for_undo(node->trx);
-
+  /// step1: 解析 undo log
   row_undo_mod_parse_undo_rec(node, thd,
                               dd_mdl_for_undo(node->trx) ? &mdl : nullptr);
 
@@ -1319,6 +1319,7 @@ dberr_t row_undo_mod(undo_node_t *node, /*!< in: row undo node */
   }
 
   if (err == DB_SUCCESS) {
+    /// step3: 主键操作
     err = row_undo_mod_clust(node, thr);
   }
 

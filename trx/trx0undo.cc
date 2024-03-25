@@ -1086,7 +1086,7 @@ int trx_undo_page_truncate_offset(trx_undo_t *undo, page_t *undo_page,
                                         undo->hdr_offset);
   trx_undo_rec_t *trunc_rec = nullptr;
 
-  while (rec != nullptr) {
+  while (rec != nullptr /* 当前页面已遍历完毕 */) {
     /* Check if current record has gone below the limit. */
     if (trx_undo_rec_get_undo_no(rec) < limit) {
       /* If this is the first record on the page, don't truncate anything */
@@ -1098,7 +1098,7 @@ int trx_undo_page_truncate_offset(trx_undo_t *undo, page_t *undo_page,
       return (trunc_rec - undo_page);
     }
 
-    /* Truncate at least up to this record, maybe more */
+        /* Truncate at least up to this record, maybe more */
     trunc_rec = rec;
     rec = trx_undo_page_get_prev_rec(rec, undo->hdr_page_no, undo->hdr_offset);
   }

@@ -89,11 +89,12 @@ static void trx_rollback_to_savepoint_low(
 
   roll_node = roll_node_create(heap);
 
-  if (savept != nullptr) {
+  if (savept != nullptr /* roll to savepoint*/) {
     roll_node->partial = true;
     roll_node->savept = *savept;
     check_trx_state(trx);
   } else {
+    // roll back to startup
     assert_trx_nonlocking_or_in_list(trx);
   }
 
@@ -102,25 +103,27 @@ static void trx_rollback_to_savepoint_low(
   if (trx_is_rseg_updated(trx)) {
     ut_ad(trx->rsegs.m_redo.rseg != nullptr ||
           trx->rsegs.m_noredo.rseg != nullptr);
-
+    /// 这里会编译出相应的执行计划，step 为 QUE_NODE_ROLLBACK 并最终调用 trx_rollback_step 函数
     thr = pars_complete_graph_for_exec(roll_node, trx, heap, nullptr);
 
     ut_a(thr == que_fork_start_command(
                     static_cast<que_fork_t *>(que_node_get_parent(thr))));
-
+    // 等待 trx_rollback_step 执行完毕
     que_run_threads(thr);
 
     ut_a(roll_node->undo_thr != nullptr);
+    // 等待 trx_rollback_start 中 que_fork_start_command 执行完毕，即 undo 完成
     que_run_threads(roll_node->undo_thr);
 
     /* Free the memory reserved by the undo graph. */
     que_graph_free(static_cast<que_t *>(roll_node->undo_thr->common.parent));
   }
 
-  if (savept == nullptr) {
+  if (savept == nullptr /* 对应 sql rollback，执行后事务结束 */) {
     trx_rollback_finish(trx);
     MONITOR_INC(MONITOR_TRX_ROLLBACK);
   } else {
+    /* 对应 sql rollback to sp，执行后事务没有结束 */
     trx->lock.que_state = TRX_QUE_RUNNING;
     MONITOR_INC(MONITOR_TRX_ROLLBACK_SAVEPOINT);
   }
@@ -339,6 +342,7 @@ static trx_named_savept_t *trx_savepoint_find(
     trx_t *trx,       /*!< in: transaction */
     const char *name) /*!< in: savepoint name */
 {
+  /// 遍历，复杂度 O(n)
   for (auto savep : trx->trx_savepoints) {
     if (0 == ut_strcmp(savep->name, name)) {
       return (savep);
@@ -499,7 +503,7 @@ dberr_t trx_savepoint_for_mysql(
 {
   trx_named_savept_t *savep;
 
-  trx_start_if_not_started_xa(trx, false, UT_LOCATION_HERE);
+  trx_start_if_not_started_xa(trx, false /* 无法判断是否是写事务 */, UT_LOCATION_HERE);
 
   savep = trx_savepoint_find(trx, savepoint_name);
 
@@ -518,7 +522,7 @@ dberr_t trx_savepoint_for_mysql(
       ut::malloc_withkey(UT_NEW_THIS_FILE_PSI_KEY, sizeof(*savep)));
 
   savep->name = mem_strdup(savepoint_name);
-
+  /// savepoint 本质上是 name -> undo no 的映射
   savep->savept = trx_savept_take(trx);
 
   savep->mysql_binlog_cache_pos = binlog_cache_pos;
@@ -564,7 +568,7 @@ bool trx_is_recv(const trx_t *trx) /*!< in: transaction */
 trx_savept_t trx_savept_take(trx_t *trx) /*!< in: transaction */
 {
   trx_savept_t savept;
-
+  // undo_no 只用于标记同一个事务内 undo log 的写入顺序
   savept.least_undo_no = trx->undo_no;
 
   return (savept);
@@ -888,7 +892,7 @@ static const page_t *trx_roll_pop_top_rec(trx_t *trx, trx_undo_t *undo,
 
   const page_t *undo_page = trx_undo_page_get_s_latched(
       page_id_t(undo->space, undo->top_page_no), undo->page_size, mtr);
-
+  /// 找到最近一条 undo
   *undo_offset = static_cast<uint32_t>(undo->top_offset);
 
   trx_undo_rec_t *prev_rec =
@@ -903,7 +907,7 @@ static const page_t *trx_roll_pop_top_rec(trx_t *trx, trx_undo_t *undo,
     if (prev_rec_page != undo_page) {
       trx->pages_undone++;
     }
-
+    /// 更新标识位，这里不进行截断；注意 top_offset 对应的 undo log 已经被处理掉了
     undo->top_page_no = page_get_page_no(prev_rec_page);
     undo->top_offset = prev_rec - prev_rec_page;
     undo->top_undo_no = trx_undo_rec_get_undo_no(prev_rec);
@@ -937,10 +941,10 @@ static trx_undo_rec_t *trx_roll_pop_top_rec_of_trx_low(
   rseg = undo_ptr->rseg;
 
   mutex_enter(&trx->undo_mutex);
-
+  /// 事务产生的 undo page 大于阈值
   if (trx->pages_undone >= TRX_ROLL_TRUNC_THRESHOLD) {
     rseg->latch();
-
+    /// 尝试阶段 undo no 大于当前 undo no 的 undo record （它们将被回滚）
     trx_roll_try_truncate(trx, undo_ptr);
 
     rseg->unlatch();
@@ -949,6 +953,7 @@ static trx_undo_rec_t *trx_roll_pop_top_rec_of_trx_low(
   ins_undo = undo_ptr->insert_undo;
   upd_undo = undo_ptr->update_undo;
 
+  /// 根据两个 undo list 结尾 record 的 undo no 来决定 pop
   if (!ins_undo || ins_undo->empty) {
     undo = upd_undo;
   } else if (!upd_undo || upd_undo->empty) {
@@ -958,7 +963,7 @@ static trx_undo_rec_t *trx_roll_pop_top_rec_of_trx_low(
   } else {
     undo = ins_undo;
   }
-
+  /// finished
   if (!undo || undo->empty || limit > undo->top_undo_no) {
     rseg->latch();
     trx_roll_try_truncate(trx, undo_ptr);
@@ -998,13 +1003,13 @@ static trx_undo_rec_t *trx_roll_pop_top_rec_of_trx_low(
       trx_roll_progress_printed_pct = progress_pct;
     }
   }
-
+  /// 逐条回退 trx undo no
   trx->undo_no = undo_no;
   trx->undo_rseg_space = undo->rseg->space_id;
 
   undo_rec_copy =
       trx_undo_rec_copy(undo_page, static_cast<uint32_t>(undo_offset), heap);
-
+  /// 注意这里不会逐条删除 undo log，而是选择去 truncate
   mutex_exit(&trx->undo_mutex);
 
   mtr_commit(&mtr);
@@ -1055,7 +1060,7 @@ static que_t *trx_roll_graph_build(trx_t *trx, bool partial_rollback) {
   fork->trx = trx;
 
   thr = que_thr_create(fork, heap, nullptr);
-
+  /// 指令为 QUE_NODE_UNDO，对应函数为 row_undo_step
   thr->child = row_undo_node_create(trx, thr, heap, partial_rollback);
 
   return (fork);
@@ -1099,6 +1104,7 @@ static que_thr_t *trx_rollback_start(trx_t *trx, ib_id_t roll_limit,
 /** Finishes a transaction rollback. */
 static void trx_rollback_finish(trx_t *trx) /*!< in: transaction */
 {
+  // 回滚事务同样需要提交
   trx_commit(trx);
 
   trx->mod_tables.clear();
@@ -1132,7 +1138,7 @@ que_thr_t *trx_rollback_step(que_thr_t *thr) /*!< in: query thread */
 
   ut_ad(que_node_get_type(node) == QUE_NODE_ROLLBACK);
 
-  if (thr->prev_node == que_node_get_parent(node)) {
+  if (thr->prev_node == que_node_get_parent(node) /* 将要开始 roll back */) {
     node->state = ROLL_NODE_SEND;
   }
 
@@ -1149,7 +1155,7 @@ que_thr_t *trx_rollback_step(que_thr_t *thr) /*!< in: query thread */
     ut_a(node->undo_thr == nullptr);
 
     roll_limit = node->partial ? node->savept.least_undo_no : 0;
-
+    // step1. 检查事务状态，若事务未持有锁，本线程进入 suspend 状态
     trx_commit_or_rollback_prepare(trx);
 
     node->undo_thr = trx_rollback_start(trx, roll_limit, node->partial);

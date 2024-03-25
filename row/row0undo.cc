@@ -258,6 +258,7 @@ func_exit:
   trx = node->trx;
   ut_ad(trx->in_rollback);
 
+
   if (node->state == UNDO_NODE_FETCH_NEXT) {
     node->undo_rec = trx_roll_pop_top_rec_of_trx(trx, trx->roll_limit,
                                                  &roll_ptr, node->heap);
@@ -277,7 +278,7 @@ func_exit:
 
       return (DB_SUCCESS);
     }
-
+    /// node 只用于信息传递
     node->roll_ptr = roll_ptr;
     node->undo_no = trx_undo_rec_get_undo_no(node->undo_rec);
 
@@ -293,10 +294,13 @@ func_exit:
   or ALTER TABLE should be impossible, because it should be
   holding both LOCK_X and MDL_EXCLUSIVE on the table. */
   if (node->state == UNDO_NODE_INSERT) {
+    /// 插入操作只需要删除记录即可，因为记录还未提交，不会被其他事务使用
+    /// 回滚可能需要处理 SMO
     err = row_undo_ins(node, thr);
 
     node->state = UNDO_NODE_FETCH_NEXT;
   } else {
+    /// 更新操作只需要读取并恢复到之前的版本；回滚可能需要处理 SMO
     ut_ad(node->state == UNDO_NODE_MODIFY);
     err = row_undo_mod(node, thr);
   }

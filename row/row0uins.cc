@@ -473,7 +473,7 @@ dberr_t row_undo_ins(undo_node_t *node, /*!< in: row undo node */
   ut_ad(trx_undo_roll_ptr_is_insert(node->roll_ptr));
 
   THD *thd = dd_thd_for_undo(node->trx);
-
+  /// step1 解析 undo log
   row_undo_ins_parse_undo_rec(node, thd,
                               dd_mdl_for_undo(node->trx) ? &mdl : nullptr);
 
@@ -489,12 +489,12 @@ dberr_t row_undo_ins(undo_node_t *node, /*!< in: row undo node */
   node->index = node->index->next();
 
   dict_table_skip_corrupt_index(node->index);
-
+  /// step2 删除非聚簇索引
   err = row_undo_ins_remove_sec_rec(node, thr);
 
   if (err == DB_SUCCESS) {
     log_free_check();
-
+    /// step3 删除聚簇索引
     // FIXME: We need to update the dict_index_t::space and
     // page number fields too.
     err = row_undo_ins_remove_clust_rec(node);
