@@ -78,7 +78,7 @@ class MVCC {
   @return true if the view is active and valid */
   static bool is_view_active(ReadView *view) {
     ut_a(view != reinterpret_cast<ReadView *>(0x1));
-
+    // 指针默认对齐，只读事务的非活跃的 view 会被增加 0x1 的偏移量
     return (view != nullptr && !(intptr_t(view) & 0x1));
   }
 

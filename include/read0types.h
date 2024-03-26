@@ -280,12 +280,12 @@ class ReadView {
  private:
   /** The read should not see any transaction with trx id >= this
   value. In other words, this is the "high water mark". */
-  trx_id_t m_low_limit_id;
+  trx_id_t m_low_limit_id;  // 事务开始时的最大 id
 
   /** The read should see all trx ids which are strictly
   smaller (<) than this value.  In other words, this is the
   low water mark". */
-  trx_id_t m_up_limit_id;
+  trx_id_t m_up_limit_id; // 事务开始时仍存活的最小 id
 
   /** trx id of creating transaction, set to TRX_ID_MAX for free
   views. */
@@ -298,7 +298,7 @@ class ReadView {
   /** The view does not need to see the undo logs for transactions
   whose transaction number is strictly smaller (<) than this value:
   they can be removed in purge if not needed by other views */
-  trx_id_t m_low_limit_no;
+  trx_id_t m_low_limit_no;  // 事务开始时已经提交的事务 no
 
 #ifdef UNIV_DEBUG
   /** The low limit number up to which read views don't need to access

@@ -355,6 +355,7 @@ void ReadView::copy_trx_ids(const trx_ids_t &trx_ids) {
 
   ulint size = trx_ids.size();
 
+  // 创建 ReadView 时，持有 ReadView 的事务也是活跃事务
   if (m_creator_trx_id > 0) {
     ut_ad(size > 0);
     --size;
@@ -457,6 +458,7 @@ void ReadView::prepare(trx_id_t id) {
   if (!trx_sys->rw_trx_ids.empty()) {
     copy_trx_ids(trx_sys->rw_trx_ids);
   } else {
+    // 没有活跃事务，不需要保存 ids
     m_ids.clear();
   }
 
@@ -497,7 +499,7 @@ ReadView *MVCC::get_view() {
 @param view     View owned by this class created for the caller. Must be
 freed by calling view_close()
 @param trx      Transaction instance of caller */
-void MVCC::view_open(ReadView *&view, trx_t *trx) {
+void MVCC::view_open(ReadView *&view/* 指针的引用 */, trx_t *trx) {
   ut_ad(!srv_read_only_mode);
 
   /** If no new RW transaction has been started since the last view
@@ -523,6 +525,7 @@ void MVCC::view_open(ReadView *&view, trx_t *trx) {
       if (view->m_low_limit_id == trx_sys_get_next_trx_id_or_no()) {
         return;
       } else {
+        // 暂时设置为关闭状态，后续将重新开启
         view->m_closed = true;
       }
     }
@@ -531,6 +534,7 @@ void MVCC::view_open(ReadView *&view, trx_t *trx) {
   trx_sys_mutex_enter();
 
   if (view != nullptr) {
+    // 防止重复添加 view
     UT_LIST_REMOVE(m_views, view);
 
   } else {
@@ -558,7 +562,7 @@ ReadView *MVCC::get_oldest_view() const {
   ReadView *view;
 
   ut_ad(trx_sys_mutex_own());
-
+  // view 是按照开启顺序排列的
   for (view = UT_LIST_GET_LAST(m_views); view != nullptr;
        view = UT_LIST_GET_PREV(m_view_list, view)) {
     if (!view->is_closed()) {
@@ -574,6 +578,7 @@ Copy state from another view. Must call copy_complete() to finish.
 @param other            view to copy from */
 
 void ReadView::copy_prepare(const ReadView &other) {
+  // 设计成两阶段是为了更快地退出临界区
   ut_ad(&other != this);
 
   if (!other.m_ids.empty()) {
@@ -603,6 +608,7 @@ void ReadView::copy_complete() {
   ut_ad(!trx_sys_mutex_own());
 
   if (m_creator_trx_id > 0) {
+    // 原 view 持有事务对于新创建 view 是并发事务
     m_ids.insert(m_creator_trx_id);
   }
 
