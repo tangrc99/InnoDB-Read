@@ -177,7 +177,7 @@ que_thr_t *que_thr_create(que_fork_t *parent, mem_heap_t *heap,
 
   thr->prebuilt = prebuilt;
 
-  UT_LIST_ADD_LAST(parent->thrs, thr);
+  UT_LIST_ADD_LAST(parent->thrs, thr);  // 创建一个 thr 并且加入链表里面
 
   return (thr);
 }
@@ -233,6 +233,7 @@ que_thr_t *que_fork_scheduler_round_robin(
     que_fork_t *fork, /*!< in: a query fork */
     que_thr_t *thr)   /*!< in: current pos */
 {
+  // 这个函数只会在 purge 的时候被调用，函数主要作用就是依次取出 fork node 并检查状态
   trx_mutex_enter(fork->trx);
 
   /* If no current, start first available. */
@@ -275,6 +276,7 @@ que_thr_t *que_fork_scheduler_round_robin(
  caller */
 que_thr_t *que_fork_start_command(que_fork_t *fork) /*!< in: a query fork */
 {
+  // 确保 fork node 开始运行前有一个任务是可运行的
   que_thr_t *suspended_thr = nullptr;
   que_thr_t *completed_thr = nullptr;
 
@@ -296,7 +298,7 @@ que_thr_t *que_fork_start_command(que_fork_t *fork) /*!< in: a query fork */
 
   /* We make a single pass over the thr list within which we note which
   threads are ready to run. */
-  for (auto thr : fork->thrs) {
+  for (auto thr : fork->thrs /* 可能使用的线程在构建图时已经拿到了 */) {
     switch (thr->state) {
       case QUE_THR_COMMAND_WAIT:
 
@@ -907,6 +909,7 @@ static inline que_thr_t *que_thr_step(que_thr_t *thr) /*!< in: query thread */
   } else if (type == QUE_NODE_LOCK) {
     ut_error;
   } else if (type == QUE_NODE_THR) {
+    // 停止或结束当前 node 的执行
     thr = que_thr_node_step(thr);
   } else if (type == QUE_NODE_COMMIT) {
     thr = trx_commit_step(thr);
@@ -994,6 +997,8 @@ static void que_run_threads_low(que_thr_t *thr) /*!< in: query thread */
 /** Run a query thread. Handles lock waits. */
 void que_run_threads(que_thr_t *thr) /*!< in: query thread */
 {
+  // 该函数会在执行发生 fork 时被调用，例如：rollback、purge、表信息查询等
+  // 或者被 work thread 调用
   ut_ad(!trx_mutex_own(thr_get_trx(thr)));
 
 loop:
@@ -1020,7 +1025,7 @@ loop:
         /* thr was chosen as a deadlock victim or there was
         a lock wait timeout */
 
-        que_thr_dec_refer_count(thr, nullptr);
+        que_thr_dec_refer_count(thr, nullptr);  // 这里修改状态为 complete
         trx_mutex_exit(thr_get_trx(thr));
         break;
       }
@@ -1039,6 +1044,8 @@ loop:
 }
 
 dberr_t que_eval_sql(pars_info_t *info, const char *sql, trx_t *trx) {
+  /// 这个函数是使用 innodb 内建的 sql 解析器来完成表管理等工作，这些命令解析出的执行流程与
+  /// innodb 代码强相关
   que_t *graph;
 
   DBUG_TRACE;

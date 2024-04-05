@@ -3108,9 +3108,9 @@ void srv_purge_coordinator_thread() {
 
     if (srv_shutdown_state.load() < SRV_SHUTDOWN_PURGE &&
         (purge_sys->state == PURGE_STATE_STOP || n_total_purged == 0)) {
-      srv_purge_coordinator_suspend(slot, rseg_history_len);
+      srv_purge_coordinator_suspend(slot, rseg_history_len);  // 仅被唤醒时才会离开该函数
     }
-
+    // 在退出时会激活线程，应该先检查
     if (srv_purge_should_exit(n_total_purged)) {
       ut_a(!slot->suspended);
       break;
