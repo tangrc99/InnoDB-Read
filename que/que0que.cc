@@ -538,7 +538,7 @@ static que_thr_t *que_thr_node_step(
                     be the thread node itself */
 {
   ut_ad(thr->run_node == thr);
-
+  // 刚刚执行完控制语句，执行其内容
   if (thr->prev_node == thr->common.parent) {
     /* If control to the node came from above, it is just passed
     on */
@@ -549,7 +549,7 @@ static que_thr_t *que_thr_node_step(
   }
 
   trx_mutex_enter(thr_get_trx(thr));
-
+  // 线程执行的事务不活跃
   if (que_thr_peek_stop(thr)) {
     trx_mutex_exit(thr_get_trx(thr));
 
@@ -861,6 +861,7 @@ static inline que_thr_t *que_thr_step(que_thr_t *thr) /*!< in: query thread */
                         que_node_type_string(node), (const void *)node));
 
   if (type & QUE_NODE_CONTROL_STAT) {
+
     if ((thr->prev_node != que_node_get_parent(node)) &&
         que_node_get_next(thr->prev_node)) {
       /* The control statements, like WHILE, always pass the
@@ -970,7 +971,7 @@ static void que_run_threads_low(que_thr_t *thr) /*!< in: query thread */
 
     ut_a(next_thr == nullptr || trx->error_state == DB_SUCCESS);
 
-    if (next_thr != thr) {
+    if (next_thr != thr /* 意味着当前线程内容已经执行结束 */) {
       ut_a(next_thr == nullptr);
 
       /* This can change next_thr to a non-NULL value
@@ -998,6 +999,7 @@ void que_run_threads(que_thr_t *thr) /*!< in: query thread */
 loop:
   ut_a(thr_get_trx(thr)->error_state == DB_SUCCESS);
 
+  // 执行具体命令，并根据返回的结果来控制线程状态
   que_run_threads_low(thr);
 
   switch (thr->state) {
@@ -1045,7 +1047,7 @@ dberr_t que_eval_sql(pars_info_t *info, const char *sql, trx_t *trx) {
   ut_a(trx->error_state == DB_SUCCESS);
 
   mutex_enter(&pars_mutex);
-
+  // 这里构建的查询图已分配好了线程
   graph = pars_sql(info, sql);
 
   mutex_exit(&pars_mutex);
@@ -1054,7 +1056,7 @@ dberr_t que_eval_sql(pars_info_t *info, const char *sql, trx_t *trx) {
   trx->graph = nullptr;
 
   graph->fork_type = QUE_FORK_MYSQL_INTERFACE;
-
+  // 选择 Graph 可用的线程，并将其恢复为可运行状态
   auto thr = que_fork_start_command(graph);
   ut_a(thr);
 
