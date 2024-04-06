@@ -124,7 +124,7 @@ dict_v_col_t *dict_mem_table_add_v_col(dict_table_t *table, mem_heap_t *heap,
   v_col = dict_table_get_nth_v_col(table, i);
 
   dict_mem_fill_column_struct(&v_col->m_col, pos, mtype, prtype, len, true,
-                              UINT32_UNDEFINED, 0, 0);
+                              UINT32_UNDEFINED /* 虚拟列无物理地址 */, 0, 0);
   v_col->v_pos = i;
 
   if (num_base != 0) {

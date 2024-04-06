@@ -813,7 +813,7 @@ typedef std::list<dict_v_idx_t, ut::allocator<dict_v_idx_t>> dict_v_idx_list;
 /** Data structure for a virtual column in a table */
 struct dict_v_col_t {
   /** column structure */
-  dict_col_t m_col;
+  dict_col_t m_col;   // virtual column 是 dict_col_t 的扩展
 
   /** array of base column ptr */
   dict_col_t **base_col;

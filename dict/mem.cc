@@ -65,7 +65,7 @@ const char *dict_add_col_name(const char *col_names, /*!< in: existing column
     ulint i;
 
     for (i = 0; i < cols; i++) {
-      s += strlen(s) + 1;
+      s += strlen(s) + 1; // str1 \0 str2 \0
     }
 
     old_len = s - col_names;
@@ -75,7 +75,7 @@ const char *dict_add_col_name(const char *col_names, /*!< in: existing column
 
   new_len = strlen(name) + 1;
   total_len = old_len + new_len;
-
+  // 每一次都需要重新分配内存
   res = static_cast<char *>(mem_heap_alloc(heap, total_len));
 
   if (old_len > 0) {
@@ -83,7 +83,7 @@ const char *dict_add_col_name(const char *col_names, /*!< in: existing column
   }
 
   memcpy(res + old_len, name, new_len);
-
+  // 返回新分配出的地址
   return (res);
 }
 
