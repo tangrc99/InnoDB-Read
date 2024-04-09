@@ -69,6 +69,7 @@ dict_hdr_t *dict_hdr_get(mtr_t *mtr) /*!< in: mtr */
 void dict_hdr_get_new_id(table_id_t *table_id, space_index_t *index_id,
                          space_id_t *space_id, const dict_table_t *table,
                          bool disable_redo) {
+  // 在已有的基础上，分配出新的 id
   dict_hdr_t *dict_hdr;
   ib_id_t id;
   mtr_t mtr;
@@ -231,6 +232,8 @@ dberr_t dict_boot(void) {
 
   /* For upgrading, we need to load the old InnoDB internal SYS_*
   tables. */
+  // 下面一大段是按照预设来创建 SYS_TABLES SYS_COLUMNS SYS_INDEXES SYS_FIELDS 表
+  // 并且创建相关的索引
   if (srv_is_upgrade_mode) {
     dict_table_t *table;
     dict_index_t *index;

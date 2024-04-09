@@ -145,6 +145,7 @@ static bool name_of_col_is(const dict_table_t *table, /*!< in: table */
                            ulint i,          /*!< in: index field offset */
                            const char *name) /*!< in: name to compare to */
 {
+  // 索引可能包含多个字段，先找到字段对应的列，再对比列名
   ulint tmp = dict_col_get_no(index->get_field(i)->col);
 
   return (strcmp(name, table->get_col_name(tmp)) == 0);
@@ -184,6 +185,9 @@ char *dict_get_first_table_name_in_db(
   dfield_set_data(dfield, name, ut_strlen(name));
   dict_index_copy_types(tuple, sys_index, 1);
 
+  // SYS_TABLES 中存储的记录格式为 db_name/table_name
+  // 在 SYS_TABLES 通过 btree 找到对应的数据库记录；
+  // path 应该为 name/ 所以使用 GE 模式搜寻
   pcur.open_on_user_rec(sys_index, tuple, PAGE_CUR_GE, BTR_SEARCH_LEAF, &mtr,
                         UT_LOCATION_HERE);
 loop:
@@ -201,7 +205,7 @@ loop:
 
   field = rec_get_nth_field_old(nullptr, rec, DICT_FLD__SYS_TABLES__NAME, &len);
 
-  if (len < strlen(name) || ut_memcmp(name, field, strlen(name)) != 0) {
+  if (len < strlen(name) || ut_memcmp(name, field, strlen(name)) != 0/* 对比数据库名称 */) {
     /* Not found */
 
     pcur.close();
@@ -211,7 +215,7 @@ loop:
     return (nullptr);
   }
 
-  if (!rec_get_deleted_flag(rec, 0)) {
+  if (!rec_get_deleted_flag(rec, 0) /* table 可能已经被删除 */) {
     /* We found one */
 
     char *table_name = mem_strdupl((char *)field, len);
@@ -276,6 +280,7 @@ const rec_t *dict_startscan_system(
 
   pcur->open_at_side(true, clust_index, BTR_SEARCH_LEAF, true, 0, mtr);
 
+  // btree 查询
   rec = dict_getnext_system_low(pcur, mtr);
 
   return (rec);
@@ -1825,6 +1830,8 @@ loading the index definition */
 
   mtr_start(&mtr);
 
+  // step1. 在 SYS_INDEXES 中使用 table_id 索引进行查询
+  // SYS_INDEXES 中索引是 [table_id, index_id, index_name, ...]
   sys_indexes = dict_table_get_low("SYS_INDEXES");
   sys_index = UT_LIST_GET_FIRST(sys_indexes->indexes);
   ut_ad(!dict_table_is_comp(sys_indexes));
@@ -1875,6 +1882,7 @@ loading the index definition */
          rec_get_n_fields_old_raw(rec) == DICT_NUM_FIELDS__SYS_INDEXES - 1)) {
       const byte *field;
       ulint len;
+      // 读取 index name 并检查是否是临时索引
       field = rec_get_nth_field_old(nullptr, rec, DICT_FLD__SYS_INDEXES__NAME,
                                     &len);
 
@@ -1887,7 +1895,8 @@ loading the index definition */
         goto next_rec;
       }
     }
-
+    // step2.1 读取 index row 信息到 index 变量中
+    // id, page_no, fields, type 等关键信息
     err_msg =
         dict_load_index_low(buf, table->name.m_name, heap, rec, true, &index);
     ut_ad((index == nullptr && err_msg != nullptr) ||
@@ -1925,7 +1934,7 @@ loading the index definition */
     }
 
     ut_ad(index);
-
+    // step2.2 检查索引
     /* Check whether the index is corrupted */
     if (index->is_corrupted()) {
       ib::error(ER_IB_MSG_200) << "Index " << index->name << " of table "
@@ -1948,7 +1957,7 @@ loading the index definition */
                                 << " of table " << table->name;
       }
     }
-
+    // step2.3 全文本索引
     if (index->type & DICT_FTS && !dict_table_has_fts_index(table)) {
       /* This should have been created by now. */
       ut_a(table->fts != nullptr);
@@ -1998,6 +2007,7 @@ loading the index definition */
     pcur.move_to_next_user_rec(&mtr);
   }
 
+  // step3. 处理全文本相关
   ut_ad(table->fts_doc_id_index == nullptr);
 
   if (table->fts != nullptr) {
@@ -2040,14 +2050,14 @@ static const char *dict_load_table_low(table_name_t &name, const rec_t *rec,
   if (error_text != nullptr) {
     return (error_text);
   }
-
+  // 1. 将 record 内容复制出来
   dict_sys_tables_rec_read(rec, name, &table_id, &space_id, &t_num, &flags,
                            &flags2);
 
   if (flags == UINT32_UNDEFINED) {
     return ("incorrect flags in SYS_TABLES");
   }
-
+ // 2. 获取表中列数
   dict_table_decode_n_col(t_num, &n_cols, &n_v_col);
 
   std::string table_name(name.m_name);
@@ -2055,7 +2065,7 @@ static const char *dict_load_table_low(table_name_t &name, const rec_t *rec,
   if (dict_name::is_partition(table_name)) {
     dict_name::rebuild(table_name);
   }
-
+  // 3. 在内存中创建表结构体
   *table = dict_mem_table_create(table_name.c_str(), space_id, n_cols + n_v_col,
                                  n_v_col, 0, flags, flags2);
 
@@ -2193,13 +2203,16 @@ dict_table_t *dict_load_table(const char *name, bool cached,
 
   ut_ad(dict_sys_mutex_own());
 
+  // 尝试在缓存中找到记录
   result = dict_table_check_if_in_cache_low(name);
 
   table_name.m_name = const_cast<char *>(name);
 
   if (!result) {
+    // 需要从硬盘中读取，并初始化表结构体
     result = dict_load_table_one(table_name, cached, ignore_err, fk_list,
                                  &cur_table);
+    // 读取外键所在的表
     while (!fk_list.empty()) {
       table_name_t fk_table_name;
       dict_table_t *fk_table;
@@ -2435,12 +2448,14 @@ static dict_table_t *dict_load_table_one(table_name_t &name, bool cached,
   pcur.close();
   mtr_commit(&mtr);
 
+  // 查询各个系统表，创建相应的内存结构体
+  // 1.表空间文件
   dict_load_tablespace(table, ignore_err);
-
+  // 2.列信息
   dict_load_columns(table, heap);
-
+  // 3.虚拟列
   dict_load_virtual(table, heap);
-
+  // 4.系统列 [ROW_ID,ROLL_PTR,TRX_ID]
   dict_table_add_system_columns(table, heap);
 
   mem_heap_empty(heap);
@@ -2454,6 +2469,7 @@ static dict_table_t *dict_load_table_one(table_name_t &name, bool cached,
       !(ignore_err & DICT_ERR_IGNORE_RECOVER_LOCK) && table->ibd_file_missing
           ? DICT_ERR_IGNORE_ALL
           : ignore_err;
+  // 5.索引信息
   err = dict_load_indexes(table, heap, index_load_err);
 
   if (err == DB_SUCCESS) {
@@ -2467,6 +2483,7 @@ static dict_table_t *dict_load_table_one(table_name_t &name, bool cached,
   }
 
   if (dict_sys->dynamic_metadata != nullptr) {
+    // 6.动态元信息
     dict_table_load_dynamic_metadata(table);
   }
 

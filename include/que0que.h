@@ -237,7 +237,7 @@ enum que_cur_t { QUE_CUR_NOT_DEFINED, QUE_CUR_START, QUE_CUR_END };
 
 /* Query graph query thread node: the fields are protected by the
 trx_t::mutex with the exceptions named below */
-
+/// que_thr_t 是线程工作任务的 handler
 struct que_thr_t {
   que_common_t common;   /*!< type: QUE_NODE_THR */
   ulint magic_n;         /*!< magic number to catch memory
