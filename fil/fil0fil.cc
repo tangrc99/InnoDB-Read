@@ -127,6 +127,10 @@ using Tablespaces = std::vector<Moved>;
 }  // namespace dd_fil
 
 size_t fil_get_scan_threads(size_t num_files) {
+
+  // 简单策略，每 FIL_SCAN_MAX_TABLESPACES_PER_THREAD (8000) 文件使用一个额外线程
+  // 总线程数不能超过 FIL_SCAN_MAX_THREADS (16) 或 FIL_SCAN_THREADS_PER_CORE * std::thread::hardware_concurrency()
+
   /* Number of additional threads required to scan all the files.
   n_threads == 0 means that the main thread itself will do all the
   work instead of spawning any additional threads. */
@@ -372,8 +376,10 @@ struct Char_Ptr_Compare {
 /** Tablespace files discovered during startup. */
 class Tablespace_files {
  public:
+  // 根据 space id 查用户表: space_id -> names set -> table name
   using Names = std::vector<std::string, ut::allocator<std::string>>;
   using Paths = std::unordered_map<space_id_t, Names>;
+  // 根据 undo num 差回滚表: undo space num -> undo space id
   using Undo_num2id = std::unordered_map<space_id_t, space_id_t>;
 
   /** Default constructor
@@ -2138,7 +2144,7 @@ size_t Tablespace_files::add(space_id_t space_id, const std::string &name) {
 
   Names *names;
 
-  if (undo::is_reserved(space_id)) {
+  if (undo::is_reserved(space_id) /* 保留 space_id 被回滚段使用 */) {
     ut_ad(!Fil_path::has_suffix(IBD, name.c_str()));
 
     /* Use m_undo_nums to allow a reserved undo space ID
@@ -2148,7 +2154,7 @@ size_t Tablespace_files::add(space_id_t space_id, const std::string &name) {
 
     names = &m_undo_paths[space_id];
 
-  } else {
+  } else /* 用户表空间 */{
     ut_ad(!Fil_path::has_suffix(IBU, name.c_str()));
 
     if (0 == strncmp(name.c_str(), "undo_", 5)) {
@@ -2675,6 +2681,7 @@ size_t Fil_system::get_minimum_limit_for_open_files(
 }
 
 bool Fil_shard::open_file(fil_node_t *file) {
+  // The caller must own the shard mutex.
   bool success;
   fil_space_t *space = file->space;
 
@@ -2856,6 +2863,7 @@ bool Fil_shard::open_file(fil_node_t *file) {
     /* 4. We try to acquire required right for non-LRU file, if it is not taking
     part in the LRU algorithm. */
     if (!(belongs_to_lru || have_right_for_open_non_lru)) {
+      // have_right_for_open_non_lru 初始状态为 false, 检查是否有相关权限
       have_right_for_open_non_lru =
           acquire_right(fil_system->m_n_files_not_belonging_in_lru,
                         Fil_system::get_limit_for_non_lru_files(
@@ -2895,7 +2903,7 @@ bool Fil_shard::open_file(fil_node_t *file) {
 
         /* Flush tablespaces so that we can close modified files in the LRU
         list. */
-        fil_system->flush_file_spaces();
+        fil_system->flush_file_spaces();  // non LRU 无此步骤
 
         if (!fil_system->close_file_in_all_LRU()) {
           fil_system->wait_while_ios_in_progress();
@@ -2989,7 +2997,7 @@ void Fil_shard::close_file(fil_node_t *file) {
 
   ut_a(ret);
 
-  file->handle.m_file = (os_file_t)-1;
+  file->handle.m_file = (os_file_t)-1;  // = -1, os_file_t 是 type
 
   file->is_open = false;
 
@@ -3011,7 +3019,7 @@ bool Fil_shard::close_files_in_LRU() {
   for (auto file = UT_LIST_GET_LAST(m_LRU); file != nullptr;
        file = UT_LIST_GET_PREV(LRU, file)) {
     if (file->can_be_closed()) {
-      close_file(file);
+      close_file(file); // 在这里会被移除 LRU 链表
 
       return true;
     }
@@ -3717,7 +3725,7 @@ void Fil_shard::open_system_tablespaces(size_t max_n_open, size_t *n_open) {
         ++*n_open;
       }
 
-      if (max_n_open < 10 + *n_open) {
+      if (max_n_open < 10 /* TODO: magic number? */ + *n_open) {
         ib::warn(ER_IB_MSG_284, *n_open, max_n_open);
       }
     }
@@ -7420,7 +7428,7 @@ bool Fil_shard::prepare_file_for_io(fil_node_t *file) {
     }
   }
   if (file->n_pending_ios == 0) {
-    remove_from_LRU(file);
+    remove_from_LRU(file);  // 当 io 完成时，会被再次加入
   }
 
   ++file->n_pending_ios;
@@ -11388,9 +11396,10 @@ dberr_t Tablespace_dirs::scan() {
       check = std::bind(&Tablespace_dirs::duplicate_check, this, _1, _2, _3, _4,
                         _5, _6);
 
+  // 创建并发线程，检测 .ibd 文件是否重复
   par_for(PFS_NOT_INSTRUMENTED, ibd_files, n_threads, check, &m, &unique,
           &duplicates);
-
+  // 以单线程检测 undo 文件是否重复
   duplicate_check(undo_files.begin(), undo_files.end(), n_threads, &m, &unique,
                   &duplicates);
 
