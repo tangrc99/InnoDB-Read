@@ -374,7 +374,7 @@ struct fil_space_t {
   action being executed. Reading incorrect value can't lead to page being
   incorrectly evicted.
   */
-  std::atomic<uint32_t> m_version{};
+  std::atomic<uint32_t> m_version{};  // undo 表空间需要截断，每次截断时更新，防止写错误
 
   /** Number of buf_page_t entries that point to this instance.
 

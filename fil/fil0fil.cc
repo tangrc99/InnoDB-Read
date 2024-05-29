@@ -3725,7 +3725,7 @@ void Fil_shard::open_system_tablespaces(size_t max_n_open, size_t *n_open) {
         ++*n_open;
       }
 
-      if (max_n_open < 10 /* TODO: magic number? */ + *n_open) {
+      if (max_n_open < 10 /* TODO: magic number*/ + *n_open) {
         ib::warn(ER_IB_MSG_284, *n_open, max_n_open);
       }
     }
