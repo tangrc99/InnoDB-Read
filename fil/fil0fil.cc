@@ -5623,6 +5623,7 @@ static dberr_t fil_create_tablespace(space_id_t space_id, const char *name,
 
   bool success = false;
 
+  // 创建新的 .ibd 或者 .ibt 文件作为独立表空间
   auto file = os_file_create(
       type == FIL_TYPE_TEMPORARY ? innodb_temp_file_key : innodb_data_file_key,
       path, OS_FILE_CREATE | OS_FILE_ON_ERROR_NO_EXIT, OS_FILE_NORMAL,
@@ -5661,6 +5662,7 @@ static dberr_t fil_create_tablespace(space_id_t space_id, const char *name,
   bool atomic_write = false;
   bool punch_hole = false;
 
+  // 创建表空间的 header page，写入相关信息
   auto err = fil_write_initial_pages(file, path, type, size, nullptr, space_id,
                                      flags, atomic_write, punch_hole);
   if (err != DB_SUCCESS) {
@@ -5671,7 +5673,7 @@ static dberr_t fil_create_tablespace(space_id_t space_id, const char *name,
 
     return err;
   }
-
+  // sync 到硬盘
   success = os_file_flush(file);
 
   if (!success) {
@@ -5691,7 +5693,7 @@ static dberr_t fil_create_tablespace(space_id_t space_id, const char *name,
     return DB_ERROR;
   }
 #endif /* !UNIV_HOTBACKUP */
-
+  // 在内存中创建 space 对象
   auto space = fil_space_create(name, space_id, flags, type);
 
   if (space == nullptr) {
@@ -5703,7 +5705,7 @@ static dberr_t fil_create_tablespace(space_id_t space_id, const char *name,
   DEBUG_SYNC_C("fil_ibd_created_space");
 
   auto shard = fil_system->shard_by_id(space_id);
-
+  // 在内存中创建 fil_node 对象
   fil_node_t *file_node =
       shard->create_node(path, size, space, false, punch_hole, atomic_write);
 
@@ -5748,6 +5750,7 @@ static dberr_t fil_create_tablespace(space_id_t space_id, const char *name,
 
 dberr_t fil_ibd_create(space_id_t space_id, const char *name, const char *path,
                        uint32_t flags, page_no_t size) {
+  // innodb 启动时，创建 7 个用户表空间用于分配
   ut_a(size >= FIL_IBD_FILE_INITIAL_SIZE);
   ut_ad(!srv_read_only_mode);
   return fil_create_tablespace(space_id, name, path, flags, size,
@@ -5756,7 +5759,9 @@ dberr_t fil_ibd_create(space_id_t space_id, const char *name, const char *path,
 
 dberr_t fil_ibt_create(space_id_t space_id, const char *name, const char *path,
                        uint32_t flags, page_no_t size) {
+  // innodb 启动时，创建 5 个用户表空间用于分配
   ut_a(size >= FIL_IBT_FILE_INITIAL_SIZE);
+  // 临时表默认为 5 个 page，当 session 关闭后，其临时表会被 truncate 为 5 page，放入临时表空间池中
   return fil_create_tablespace(space_id, name, path, flags, size,
                                FIL_TYPE_TEMPORARY);
 }
@@ -5765,6 +5770,9 @@ dberr_t fil_ibt_create(space_id_t space_id, const char *name, const char *path,
 dberr_t fil_ibd_open(bool validate, fil_type_t purpose, space_id_t space_id,
                      uint32_t flags, const char *space_name,
                      const char *path_in, bool strict, bool old_space) {
+  // TODO: 这个函数是启动时或导入表空间时才会使用，猜测函数目的是检查表是否完整，而不是打开
+  // 表空间，然后尝试读取数据页，所以 fil_node_t 中没有打开 handle
+
   Datafile df;
   bool is_encrypted = FSP_FLAGS_GET_ENCRYPTION(flags);
   bool for_import = (purpose == FIL_TYPE_IMPORT);
@@ -5848,7 +5856,7 @@ dberr_t fil_ibd_open(bool validate, fil_type_t purpose, space_id_t space_id,
 
   /* We are done validating. If the tablespace is already open,
   return success. */
-  if (space != nullptr) {
+  if (space != nullptr) { // 表空间被打开后，会依次构建 fil_space_t 和 fil_node_t
     return DB_SUCCESS;
   }
 
@@ -5949,6 +5957,7 @@ tablespace.
 @return true if tablespace is found, false if not. */
 bool fil_space_read_name_and_filepath(space_id_t space_id, char **name,
                                       char **filepath) {
+  // 根据 space_id 获取表空间的 name 和 filepath
   bool success = false;
 
   *name = nullptr;
@@ -6508,6 +6517,7 @@ bool Fil_shard::space_extend(fil_space_t *space, page_no_t size) {
   page_no_t prev_size = 0;
 #endif /* UNIV_HOTBACKUP */
 
+  // 获取扩展权限
   for (;;) {
     mutex_acquire();
     space = get_space_by_id(space->id);
@@ -6548,7 +6558,7 @@ bool Fil_shard::space_extend(fil_space_t *space, page_no_t size) {
     }
   }
 
-  if (!prepare_file_for_io(file)) {
+  if (!prepare_file_for_io(file) /* 确保打开文件，不放入 LRU */) {
     /* The tablespace data file, such as .ibd file, is missing */
     ut_a(file->is_being_extended);
     file->is_being_extended = false;
@@ -6573,7 +6583,7 @@ bool Fil_shard::space_extend(fil_space_t *space, page_no_t size) {
                 << ", to size : " << size;
 #endif /* UNIV_HOTBACKUP */
 
-  if (size <= space->size) {
+  if (size <= space->size /* double check */) {
     ut_a(file->is_being_extended);
     file->is_being_extended = false;
 
@@ -6707,6 +6717,8 @@ bool Fil_shard::space_extend(fil_space_t *space, page_no_t size) {
 
     if ((space->initialize_while_extending() && !file->atomic_write) ||
         err == DB_IO_ERROR) {
+
+      // 通过直接向文件尾部写零来扩展文件大小
       err = fil_write_zeros(file, phy_page_size, node_start, len);
 
       if (err != DB_SUCCESS) {
@@ -7423,7 +7435,7 @@ bool Fil_shard::prepare_file_for_io(fil_node_t *file) {
   if (!file->is_open) {
     ut_a(file->n_pending_ios == 0);
 
-    if (!open_file(file)) {
+    if (!open_file(file) /* 打开 file descriptor */) {
       return false;
     }
   }
@@ -7479,6 +7491,7 @@ pending I/O's field in the file appropriately.
 @param[in]      file            Tablespace file
 @param[in]      type            Marks the file as modified type == WRITE */
 void Fil_shard::complete_io(fil_node_t *file, const IORequest &type) {
+  // 归还至 LRU，并根据情况放入 flush 链表
   ut_ad(mutex_owned());
 
   ut_a(file->n_pending_ios > 0);
@@ -7596,6 +7609,7 @@ dberr_t Fil_shard::do_io(const IORequest &type, bool sync,
                          const page_id_t &page_id, const page_size_t &page_size,
                          ulint byte_offset, ulint len, void *buf,
                          void *message) {
+  // 读取表空间中，对应 page 和 offset 位置的数据，general operation
   IORequest req_type(type);
 
   ut_ad(req_type.validate());
@@ -7988,7 +8002,7 @@ dberr_t fil_io(const IORequest &type, bool sync, const page_id_t &page_id,
 
   /* When space is deleted, we could have marked the io complete. */
   if (err != DB_SUCCESS && !sync && bpage->was_io_fixed()) {
-    bpage->take_io_responsibility();
+    bpage->take_io_responsibility();  // TODO: ???
   }
 #endif
   return err;
@@ -8099,7 +8113,7 @@ void Fil_shard::space_flush(space_id_t space_id) {
       int64_t sig_count = os_event_reset(file.sync_event);
 
       mutex_release();
-
+      // 等待当前 file 的写入操作完成，因为 space flush 函数可能被并发调用
       os_event_wait_low(file.sync_event, sig_count);
 
       mutex_acquire();
@@ -8264,6 +8278,7 @@ static void fil_buf_block_init(buf_block_t *block, byte *frame) {
   page_zip_des_init(&block->page.zip);
 }
 
+// 用来遍历 tablespace 中的页面
 struct Fil_page_iterator {
   /** File handle */
   pfs_os_file_t m_file;
