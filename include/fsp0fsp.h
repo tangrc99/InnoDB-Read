@@ -82,6 +82,7 @@ bool xdes_state_is_valid(ulint state);
 
 #ifdef UNIV_DEBUG
 struct xdes_mem_t {
+  // xds: extent descriptor
   xdes_mem_t(const xdes_t *xdes) : m_xdes(xdes) {}
 
   const char *state_name() const;
@@ -98,6 +99,11 @@ inline std::ostream &operator<<(std::ostream &out, const xdes_mem_t &obj) {
 
 /** In-memory representation of the fsp_header_t file structure. */
 struct fsp_header_mem_t {
+  /* fsp header 是表空间第一个页面中的头结构
+   * File Header
+   * FPS Header
+   * XDS ENTRY 0 - 255
+   * */
   fsp_header_mem_t(const fsp_header_t *header, mtr_t *mtr);
 
   ulint m_space_id;
