@@ -71,7 +71,7 @@ constexpr uint32_t FSP_SDI_HEADER_LEN = 8;
 
 /* The data structures in files are defined just as byte strings in C */
 typedef byte fsp_header_t;
-typedef byte xdes_t;
+typedef byte xdes_t;  // XDES Entry
 
 #ifdef UNIV_DEBUG
 /** Check if the state of extent descriptor is valid.
