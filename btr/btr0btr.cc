@@ -4779,6 +4779,7 @@ dberr_t btr_sdi_create_index(space_id_t space_id, bool dict_locked) {
   dict_table_t *sdi_table;
   page_no_t sdi_root_page_num;
 
+  // 获取 sdi_table 是为了在失败的时候执行下沉逻辑
   sdi_table = dict_sdi_get_table(space_id, dict_locked, true);
   ut_ad(sdi_table != nullptr);
 

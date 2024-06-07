@@ -63,7 +63,7 @@ static dberr_t dict_sdi_exists(const dd::Tablespace &dd_space,
     /* Claim Success */
     return (DB_SUCCESS);
   }
-
+  // 直接通过 flags 来判断，不检测 sdi root page (慢)
   return (fsp_has_sdi(*space_id));
 }
 
@@ -141,6 +141,7 @@ bool dict_sdi_create(dd::Tablespace *tablespace) {
     return (false);
   }
 
+  // 调用 btr 模块创建 sdi tree -> fseg 创建两个段
   dberr_t err = ib_sdi_create(space_id);
 
   /* If SDI index is created, update the tablespace flags in
@@ -217,6 +218,7 @@ bool dict_sdi_get_keys(const dd::Tablespace &tablespace, sdi_vector_t &vector) {
   trx_t *trx = check_trx_exists(current_thd);
   trx_start_if_not_started(trx, true, UT_LOCATION_HERE);
 
+  // sdi key 是 sdi 的主键 { type, id }
   dberr_t err = ib_sdi_get_keys(space_id, &ib_vector, trx);
 
   return (err != DB_SUCCESS);
@@ -378,6 +380,13 @@ bool dict_sdi_set(handlerton *hton, const dd::Tablespace &tablespace,
   Sdi_Compressor compressor(static_cast<uint32_t>(sdi_len), sdi);
   compressor.compress();
 
+  /* 将 sdi 信息压缩后，根据 sdi key 写入对应行中
+   * sdi row:
+   * cluster( type int, id int ),
+   * compressed_len int,
+   * uncompressed_len int,
+   * data blob not null
+   */
   err = ib_sdi_set(space_id, &ib_sdi_key, static_cast<uint32_t>(sdi_len),
                    compressor.get_comp_len(), compressor.get_data(), trx);
 
@@ -474,6 +483,7 @@ bool dict_sdi_delete(const dd::Tablespace &tablespace, const dd::Table *table,
   ib_sdi_key_t ib_sdi_key;
   ib_sdi_key.sdi_key = sdi_key;
 
+  // 根据 sdi key 删除对应行即可
   err = ib_sdi_delete(space_id, &ib_sdi_key, trx);
 
   DBUG_EXECUTE_IF("sdi_delete_failure",

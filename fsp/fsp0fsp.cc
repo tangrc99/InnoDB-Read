@@ -3998,7 +3998,7 @@ page_no_t fsp_sdi_get_root_page_num(space_id_t space,
 void fsp_sdi_write_root_to_page(page_t *page, const page_size_t &page_size,
                                 page_no_t root_page_num, mtr_t *mtr) {
   ut_ad(page_get_page_no(page) == 0);
-
+  // 如果一个表空间记录了 SDI 信息，在 fsp header 写入版本和 sdi root page
   ulint sdi_offset = fsp_header_get_sdi_offset(page_size);
 
   /* Write SDI version here. */
@@ -4170,6 +4170,7 @@ dberr_t fsp_has_sdi(space_id_t space_id) {
         ib::warn(ER_IB_MSG_429)
             << "SDI doesn't exist in tablespace: " << space->name;
       });
+  // 通过 flags 来判断
   return (FSP_FLAGS_HAS_SDI(space->flags) ? DB_SUCCESS : DB_ERROR);
 }
 
