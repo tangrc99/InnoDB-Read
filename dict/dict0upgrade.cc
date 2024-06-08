@@ -825,7 +825,7 @@ static bool dd_upgrade_partitions(THD *thd, const char *norm_name,
   return (false);
 }
 
-/* Set the ROW_FORMAT in dd_table based on InnoDB dictionary table
+/** Set the ROW_FORMAT in dd_table based on InnoDB dictionary table
 @param[in]      ib_table        InnoDB table
 @param[in,out]  dd_table        Server table object */
 static void dd_upgrade_set_row_type(dict_table_t *ib_table,
@@ -852,7 +852,7 @@ static void dd_upgrade_set_row_type(dict_table_t *ib_table,
   }
 }
 
-/* Check Innodb table definition and add FTS_DOC_ID column and index to DD table
+/** Check Innodb table definition and add FTS_DOC_ID column and index to DD table
 if needed. This is required when all FTS index are dropped but Innodb still
 retains the FTS_DOC_ID column and FTS_DOC_ID_INDEX.
 @param[in,out]  dd_table        Server table object

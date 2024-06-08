@@ -2610,6 +2610,7 @@ func_exit:
  dictionary cache at booting before calling this function. */
 void dict_load_sys_table(dict_table_t *table) /*!< in: system table */
 {
+  // @note: only used when upgrading
   mem_heap_t *heap;
 
   ut_ad(dict_sys_mutex_own());
