@@ -877,7 +877,7 @@ static dberr_t srv_undo_tablespaces_create() {
 
     /* Mark this implicit undo space number as used and return the next
     available space_id. */
-    space_id_t space_id = undo::use_next_space_id(num);
+    space_id_t space_id = undo::use_next_space_id(num); // space_id 是固定分配的
 
     /* Since it is not found, create it. */
     undo::Tablespace undo_space(space_id);

@@ -2757,7 +2757,7 @@ dberr_t row_create_table_for_mysql(dict_table_t *&table,
   }
 
   /* Assign table id and build table space. */
-  err = dict_build_table_def(table, create_info, trx);
+  err = dict_build_table_def(table, create_info, trx);  // 在这里创建 ibd 文件
   if (err != DB_SUCCESS) {
     trx->error_state = DB_SUCCESS;
     trx->op_info = "";

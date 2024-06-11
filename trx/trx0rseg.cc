@@ -71,7 +71,7 @@ page_no_t trx_rseg_header_create(space_id_t space_id,
   ut_ad(mtr_memo_contains(mtr, fil_space_get_latch(space_id), MTR_MEMO_X_LOCK));
 
   /* Allocate a new file segment for the rollback segment */
-  block = fseg_create(space_id, 0, TRX_RSEG + TRX_RSEG_FSEG_HEADER, mtr);
+  block = fseg_create(space_id, 0 /* 创建 header page */, TRX_RSEG + TRX_RSEG_FSEG_HEADER, mtr);
 
   if (block == nullptr) {
     return (FIL_NULL); /* No space left */
@@ -93,20 +93,20 @@ page_no_t trx_rseg_header_create(space_id_t space_id,
 
   /* Reset the undo log slots */
   for (i = 0; i < TRX_RSEG_N_SLOTS; i++) {
-    trx_rsegf_set_nth_undo(rsegf, i, FIL_NULL, mtr);
+    trx_rsegf_set_nth_undo(rsegf, i, FIL_NULL, mtr);  // 一个回滚段有 1024 个槽
   }
 
   /* Initialize maximum transaction number. */
   mlog_write_ull(rsegf + TRX_RSEG_MAX_TRX_NO, 0, mtr);
 
-  if (space_id == TRX_SYS_SPACE) {
+  if (space_id == TRX_SYS_SPACE /* undo 使用系统表空间 */) {
     /* All rollback segments in the system tablespace need
     to be found in the TRX_SYS page in the rseg_id slot.
     Add the rollback segment info to the free slot in the
     trx system header in the TRX_SYS page. */
 
     sys_header = trx_sysf_get(mtr);
-
+    // 修改 header 中的回滚段信息
     trx_sysf_rseg_set_space(sys_header, rseg_slot, space_id, mtr);
 
     trx_sysf_rseg_set_page_no(sys_header, rseg_slot, page_no, mtr);
@@ -121,6 +121,7 @@ page_no_t trx_rseg_header_create(space_id_t space_id,
     are tracked in the RSEG_ARRAY page. */
     rsegs_header = trx_rsegsf_get(space_id, mtr);
 
+    // 修改 header 中的回滚段信息
     trx_rsegsf_set_page_no(rsegs_header, rseg_slot, page_no, mtr);
   }
 
@@ -211,7 +212,7 @@ static void trx_rseg_persist_gtid(trx_rseg_t *rseg, trx_id_t gtid_trx_no) {
   }
 }
 
-/* Initialize rollback segment in memory
+/** Initialize rollback segment in memory
 @param[in]      id              rollback segment id
 @param[in]      space_id        space id of the space
 @param[in]      page_no         page no for the rollback segment
@@ -329,7 +330,7 @@ page_no_t trx_rseg_get_page_no(space_id_t space_id, ulint rseg_id) {
   mtr.start();
 
   trx_rsegsf_t *rsegs_header = trx_rsegsf_get(space_id, &mtr);
-
+  // 拿出 slot 中的 root page
   page_no_t page_no = trx_rsegsf_get_page_no(rsegs_header, rseg_id, &mtr);
 
   mtr.commit();
@@ -402,7 +403,7 @@ trx_rseg_t *trx_rseg_mem_create(ulint id, space_id_t space_id,
 
   auto len = flst_get_len(rseg_header + TRX_RSEG_HISTORY);
 
-  if (len > 0) {
+  if (len > 0 /* 回滚段中有历史事务 */ ) {
     trx_sys->rseg_history_len += len;
 
     /* Extract GTID from history and send to GTID persistor. */
@@ -730,7 +731,7 @@ page_no_t trx_rseg_create(space_id_t space_id, ulint rseg_id) {
   } else if (space_id == TRX_SYS_SPACE) {
     /* We will modify TRX_SYS_RSEGS in TRX_SYS page. */
   }
-
+  // 创建一个新段，并初始化 header page
   page_no_t page_no = trx_rseg_header_create(space_id, univ_page_size,
                                              PAGE_NO_MAX, rseg_id, &mtr);
 
@@ -827,7 +828,7 @@ bool trx_rseg_add_rollback_segments(space_id_t space_id, ulong target_rsegs,
   at the same time. */
   rsegs->x_lock();
 
-  for (ulint num = 0; num < FSP_MAX_ROLLBACK_SEGMENTS; num++) {
+  for (ulint num = 0; num < FSP_MAX_ROLLBACK_SEGMENTS /* 128 */; num++) {
     if (rsegs->size() >= target_rsegs) {
       break;
     }
@@ -844,6 +845,7 @@ bool trx_rseg_add_rollback_segments(space_id_t space_id, ulong target_rsegs,
     /* Look in the tablespace to discover if the rollback segment
     already exists. */
     if (type == UNDO) {
+      // 在 undo tablespace 中，rseg 会被提前创建好
       page_no = trx_rseg_get_page_no(space_id, rseg_id);
 
     } else {
@@ -1031,6 +1033,7 @@ bool trx_rseg_init_rollback_segments(space_id_t space_id,
   undo::Tablespace *undo_space = undo::spaces->find(space_num);
   undo::spaces->s_unlock();
 
+  // 创建 rollback segment
   if (!trx_rseg_add_rollback_segments(space_id, target_rollback_segments,
                                       undo_space->rsegs(), &n_total_created)) {
     return (false);
@@ -1129,6 +1132,7 @@ created so the next page created here should by FSP_FSEG_DIR_PAGE_NUM.
 @param[in]      space_id        Undo Tablespace ID
 @param[in]      mtr             mtr */
 void trx_rseg_array_create(space_id_t space_id, mtr_t *mtr) {
+  // 创建存放不同 segment 的 header page
   trx_rsegsf_t *rsegs_header;
   buf_block_t *block;
   page_t *page;

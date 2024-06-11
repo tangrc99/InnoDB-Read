@@ -189,7 +189,7 @@ inline trx_rsegsf_t *trx_rsegsf_get(space_id_t space_id, mtr_t *mtr) {
 
   ut_ad(mtr != nullptr);
   ut_ad(undo::is_reserved(space_id));
-
+  // 独立表空间中，第 3 页为 header 文件
   block = buf_page_get(page_id_t(space_id, FSP_RSEG_ARRAY_PAGE_NO),
                        univ_page_size, RW_X_LATCH, UT_LOCATION_HERE, mtr);
   buf_block_dbg_add_level(block, SYNC_RSEG_ARRAY_HEADER);

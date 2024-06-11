@@ -351,6 +351,7 @@ ulint trx_sysf_rseg_find_free(mtr_t *mtr) {
   trx_sysf_t *sys_header = trx_sysf_get(mtr);
 
   for (ulint slot_no = 0; slot_no < TRX_SYS_N_RSEGS; slot_no++) {
+    // TRX_SYS_HEADER 中保留有 undo slot
     page_no_t page_no = trx_sysf_rseg_get_page_no(sys_header, slot_no, mtr);
 
     if (page_no == FIL_NULL) {
@@ -422,7 +423,7 @@ static void trx_sysf_create(mtr_t *mtr) /*!< in: mtr */
   /* Create the first rollback segment in the SYSTEM tablespace */
   slot_no = trx_sysf_rseg_find_free(mtr);
   page_no = trx_rseg_header_create(TRX_SYS_SPACE, univ_page_size, PAGE_NO_MAX,
-                                   slot_no, mtr);
+                                   slot_no, mtr); // 系统表空间中也存在回滚段
 
   ut_a(slot_no == TRX_SYS_SYSTEM_RSEG_ID);
   ut_a(page_no == FSP_FIRST_RSEG_PAGE_NO);
@@ -595,6 +596,7 @@ void trx_sys_create_sys_pages(void) {
 
   mtr_start(&mtr);
 
+  // 创建 TRX_SYS_HEADER
   trx_sysf_create(&mtr);
 
   mtr_commit(&mtr);
