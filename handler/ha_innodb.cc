@@ -12040,7 +12040,7 @@ void innodb_base_col_setup_for_stored(const dict_table_t *table,
   if (m_flags2 & (DICT_TF2_FTS | DICT_TF2_FTS_ADD_DOC_ID) && !has_doc_id_col) {
     fts_add_doc_id_column(table, heap);
   }
-
+  // 根据配置，创建表空间文件
   if (table->is_temporary()) {
     if (m_create_info->compress.length > 0) {
       push_warning_printf(m_thd, Sql_condition::SL_WARNING, HA_ERR_UNSUPPORTED,

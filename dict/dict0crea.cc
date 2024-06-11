@@ -60,6 +60,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 dberr_t dict_build_table_def(dict_table_t *table,
                              const HA_CREATE_INFO *create_info, trx_t *trx) {
+  // 这个函数是创建一个表空间，表空间对应着文件系统中的一个 space
   std::string db_name;
   std::string tbl_name;
   dict_name::get_table(table->name.m_name, db_name, tbl_name);
@@ -72,16 +73,16 @@ dberr_t dict_build_table_def(dict_table_t *table,
   during bootstrap or upgrade */
   static uint32_t dd_table_id = 1;
 
-  if (is_dd_table) {
+  if (is_dd_table /* dd 表代表这是一个字典数据表 */ ) {
     table->id = dd_table_id++;
     table->is_dd_table = true;
 
     ut_ad(strcmp(tbl_name.c_str(), innodb_dd_table[table->id - 1].name) == 0);
 
-  } else {
+  } else /* 代表这是用户表 */ {
     dict_table_assign_new_id(table);
   }
-
+  // 以独立表空间创建 .ibd 文件
   dberr_t err = dict_build_tablespace_for_table(table, create_info, trx);
 
   return (err);
@@ -190,7 +191,7 @@ dberr_t dict_build_tablespace_for_table(dict_table_t *table,
   needs_file_per_table =
       DICT_TF2_FLAG_IS_SET(table, DICT_TF2_USE_FILE_PER_TABLE);
 
-  if (needs_file_per_table) {
+  if (needs_file_per_table /* 独立表空间 */) {
     /* Temporary table would always reside in the same
     shared temp tablespace. */
     ut_ad(!table->is_temporary());
@@ -264,6 +265,8 @@ dberr_t dict_build_tablespace_for_table(dict_table_t *table,
                ? (create_info->m_implicit_tablespace_autoextend_size /
                   srv_page_size)
                : FIL_IBD_FILE_INITIAL_SIZE;
+
+    // 创建独立表空间文件
     err = fil_ibd_create(space, tablespace_name.c_str(), filepath, fsp_flags,
                          size);
 
@@ -416,7 +419,7 @@ dberr_t dict_create_index_tree_in_mem(dict_index_t *index, trx_t *trx) {
   }
 
   dberr_t err = DB_SUCCESS;
-
+  // 在对应 space 中创建新 btr
   page_no = btr_create(index->type, index->space, index->id, index, &mtr);
 
   index->page = page_no;
@@ -686,6 +689,7 @@ dict_index_t *dict_sdi_create_idx_in_mem(space_id_t space, bool space_discarded,
   snprintf(table_name, sizeof(table_name), "SDI_" SPACE_ID_PF, space);
 
   constexpr size_t n_cols_sdi = 5;
+  // 虽然和数据表在同一个 space 中，但是 sdi 是一个单独的 dict_table_t
   dict_table_t *table = dict_mem_table_create(table_name, space, n_cols_sdi, 0,
                                               0, table_flags, 0);
 

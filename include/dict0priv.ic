@@ -40,7 +40,7 @@ inline dict_table_t *dict_table_get_low(const char *table_name,
 
   ut_ad(table_name);
   ut_ad(dict_sys_mutex_own());
-
+  // 1. 查哈希表，看看能不能直接拿到
   table = dict_table_check_if_in_cache_low(table_name);
 
   if (table && table->is_corrupted()) {
@@ -52,7 +52,7 @@ inline dict_table_t *dict_table_get_low(const char *table_name,
       return (nullptr);
     }
   }
-
+  // 2. 需要从硬盘中加载
   if (table == nullptr) {
     table = dict_load_table(table_name, true, DICT_ERR_IGNORE_NONE, prev_table);
   }

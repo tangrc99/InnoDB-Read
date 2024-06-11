@@ -1061,7 +1061,7 @@ struct dict_index_t {
   /** space where the index tree is placed */
   unsigned space : 32;
 
-  /** index tree root page number */
+  /** index tree root page number (sdi root page number) */
   unsigned page : 32;
 
   /** In the pessimistic delete, if the page data size drops below this limit

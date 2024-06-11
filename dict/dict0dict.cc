@@ -948,6 +948,7 @@ its original MySQL table position n
 @param[in]      n       MySQL column position
 @return column position in InnoDB */
 ulint dict_table_mysql_pos_to_innodb(const dict_table_t *table, ulint n) {
+  // 列号 减去 它之前的虚拟列
   ut_ad(n < table->n_t_cols);
 
   if (table->n_v_def == 0) {
@@ -1057,7 +1058,8 @@ void dict_move_to_mru(dict_table_t *table) /*!< in: table to move to MRU */
  NOTE! This is a high-level function to be used mainly from outside the
  'dict' module. Inside this directory dict_table_get_low
  is usually the appropriate function.
- @return table, NULL if does not exist */
+ @return table, NULL if does not exist
+ @note old interface */
 dict_table_t *dict_table_open_on_name(
     const char *table_name,       /*!< in: table name */
     bool dict_locked,             /*!< in: true=data dictionary locked */
@@ -1084,6 +1086,7 @@ dict_table_t *dict_table_open_on_name(
   if (dict_name::is_partition(table_name)) {
     dict_name::rebuild(table_str);
   }
+  // 这里重复了，dict_load_table 也会尝试从缓存中找
   table = dict_table_check_if_in_cache_low(table_str.c_str());
 
   if (table == nullptr) {
@@ -1106,11 +1109,11 @@ dict_table_t *dict_table_open_on_name(
                                  " and recreate it";
       return nullptr;
     }
-
+    // 放入到 LRU 链表
     if (table->can_be_evicted) {
       dict_move_to_mru(table);
     }
-
+    // 增加引用计数
     table->acquire();
   }
 
@@ -1270,7 +1273,7 @@ static bool dict_table_can_be_evicted(
   ut_a(table->foreign_set.empty());
   ut_a(table->referenced_set.empty());
 
-  if (table->get_ref_count() == 0) {
+  if (table->get_ref_count() == 0 /* 没有线程调用表信息 */) {
     const dict_index_t *index;
 
     /* The transaction commit and rollback are called from
@@ -1282,6 +1285,7 @@ static bool dict_table_can_be_evicted(
       return false;
     }
 
+    // 检查是否有线程调用 index 信息
     for (index = table->first_index(); index != nullptr;
          index = index->next()) {
       /* We are not allowed to free the in-memory index
@@ -1316,6 +1320,7 @@ ulint dict_make_room_in_cache(
     ulint max_tables, /*!< in: max tables allowed in cache */
     ulint pct_check)  /*!< in: max percent to check */
 {
+  // 函数会在 master 线程中被调用
   ulint i;
   ulint len;
   dict_table_t *table;
@@ -1330,6 +1335,7 @@ ulint dict_make_room_in_cache(
 
   i = len = UT_LIST_GET_LEN(dict_sys->table_LRU);
 
+  // 只有超出上限后才会使用
   if (len < max_tables) {
     return (0);
   }
@@ -2674,7 +2680,7 @@ static void dict_index_remove_from_cache_low(
   if (dict_index_has_virtual(index)) {
     const dict_col_t *col;
     const dict_v_col_t *vcol;
-
+    // 同样释放 index 中包含的 virtual column 信息
     for (ulint i = 0; i < dict_index_get_n_fields(index); i++) {
       col = index->get_col(i);
       if (col->is_virtual()) {
@@ -4033,6 +4039,7 @@ static bool dict_table_apply_dynamic_metadata(
 @param[in]      metadata        where we store the metadata from buffer */
 void dict_table_read_dynamic_metadata(const byte *buffer, ulint size,
                                       PersistentTableMetadata *metadata) {
+  // 将 metadata 存储到 Persister 的缓冲区中
   const byte *pos = buffer;
   persistent_type_t type;
   Persister *persister;
@@ -4065,6 +4072,8 @@ in DDTableBuffer table of the specific table. If so, read the metadata and
 update the table object accordingly. It's used when loading table.
 @param[in]      table           table object */
 void dict_table_load_dynamic_metadata(dict_table_t *table) {
+  // 将硬盘中 table 的 metadata 读取出来；
+  // 如果发现内存中的为脏数据，放入 persister 中
   DDTableBuffer *table_buffer;
 
   ut_ad(dict_sys != nullptr);
@@ -4076,16 +4085,17 @@ void dict_table_load_dynamic_metadata(dict_table_t *table) {
   mutex_enter(&dict_persist->mutex);
 
   uint64_t version;
+  // 从硬盘中拿到 metadata
   const auto readmeta = table_buffer->get(table->id, &version);
 
   if (!readmeta.empty()) {
     /* Persistent dynamic metadata of this table have changed
     recently, we need to update them to in-memory table */
     PersistentTableMetadata metadata(table->id, version);
-
+    // 将 readmeta 拷贝至 metadata
     dict_table_read_dynamic_metadata(readmeta.data(), readmeta.size(),
                                      &metadata);
-
+    // 检测现有 dict_table_t 是否产生冲突
     bool is_dirty = dict_table_apply_dynamic_metadata(table, &metadata);
 
     /* If !is_dirty, it could be either:
@@ -5117,6 +5127,7 @@ void DDTableBuffer::init() {
     ut_ad(dict_table_is_comp(dict_sys->dynamic_metadata));
     m_index = dict_sys->dynamic_metadata->first_index();
   } else {
+    // 创建元数据的 dict_table_t
     open();
     dict_sys->dynamic_metadata = m_index->table;
   }
@@ -5139,6 +5150,7 @@ void DDTableBuffer::init() {
 
 /** Open the mysql.innodb_dynamic_metadata when DD is not fully up */
 void DDTableBuffer::open() {
+  // 创建元数据的 dict_table_t
   ut_ad(dict_sys->dynamic_metadata == nullptr);
 
   dict_table_t *table = nullptr;
@@ -5159,7 +5171,7 @@ void DDTableBuffer::open() {
       ++root;
       ut_ad(!fsp_is_inode_page(root));
     }
-
+    // guess: 从第四页开始，第二个不是 inode 的 page 是 root page
     if (++index_id == dict_sys_t::s_dynamic_meta_index_id) {
       break;
     }
@@ -5186,6 +5198,7 @@ void DDTableBuffer::open() {
   prtype =
       dtype_form_prtype(MYSQL_TYPE_BLOB | DATA_NOT_NULL | DATA_BINARY_TYPE, 63);
 
+  // 可以看到 metadata 是以 BLOB 形式存储的
   dict_mem_table_add_col(table, heap, metadata_name, DATA_BLOB, prtype, 10,
                          true);
 
@@ -5208,7 +5221,7 @@ void DDTableBuffer::open() {
   m_index = table->first_index();
 
   dict_sys_mutex_enter();
-
+  // mysql.innodb_dynamic_metadata 有单独的永久 handle: dynamic_metadata
   dict_table_add_to_cache(table, true);
 
   table->acquire();
@@ -5246,6 +5259,7 @@ void DDTableBuffer::close() {
 or NULL if there isn't any different field */
 upd_t *DDTableBuffer::update_set_metadata(const dtuple_t *entry,
                                           const rec_t *rec) {
+  // 比较 entry 和 rec 中的信息是否有不同
   ulint offsets[N_FIELDS + 1 + REC_OFFS_HEADER_SIZE];
   upd_field_t *upd_field;
   const dfield_t *version_field;
@@ -5322,7 +5336,7 @@ dberr_t DDTableBuffer::replace(table_id_t id, uint64_t version,
 
   pcur.open(m_index, 0, m_search_tuple, PAGE_CUR_LE, BTR_MODIFY_TREE, &mtr,
             UT_LOCATION_HERE);
-
+  // btr 搜索原有的 metadata
   if (page_rec_is_infimum(pcur.get_rec()) ||
       pcur.get_low_match() < m_index->n_uniq) {
     /* The record was not found, so it's the first time we
@@ -5347,7 +5361,7 @@ dberr_t DDTableBuffer::replace(table_id_t id, uint64_t version,
 
   /* Prepare to update the record. */
   upd_t *update = update_set_metadata(entry, pcur.get_rec());
-
+  // btr 更新行
   if (update != nullptr) {
     ulint *cur_offsets = nullptr;
     big_rec_t *big_rec;
@@ -5406,7 +5420,7 @@ dberr_t DDTableBuffer::remove(table_id_t id) {
 has been written back to DD table */
 void DDTableBuffer::truncate() {
   ut_ad(mutex_own(&dict_persist->mutex));
-
+  // 将 buffer pool 中所有的缓存移出
   btr_truncate(m_index);
 }
 
