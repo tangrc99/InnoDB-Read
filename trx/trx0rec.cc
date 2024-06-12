@@ -2261,7 +2261,7 @@ dberr_t trx_undo_report_row_operation(
     undo_page = buf_block_get_frame(undo_block);
     ut_ad(page_no == undo_block->page.id.page_no());
 
-    // 在这一步，undo log 已经被添加至 undo log page，同时写入一个 redo log
+    // 在这一步，undo record 已经被添加至 undo log page，同时写入一个 redo log
     switch (op_type) {
       case TRX_UNDO_INSERT_OP:
         offset = trx_undo_page_report_insert(undo_page, trx, index, clust_entry,

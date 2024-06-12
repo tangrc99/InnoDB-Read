@@ -1009,9 +1009,8 @@ struct trx_t {
                         with no gaps; thus it represents
                         the number of modified/inserted
                         rows in a transaction */
-  space_id_t undo_rseg_space;
-  /*!< space id where last undo record
-  was written */
+  space_id_t undo_rseg_space; /*!< space id where last undo record
+                               * was written */
   trx_savept_t last_sql_stat_start;
   /*!< undo_no when the last sql statement
   was started: in case of an error, trx

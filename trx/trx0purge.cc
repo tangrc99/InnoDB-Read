@@ -334,7 +334,7 @@ void trx_purge_add_update_undo_to_history(
 
   undo_header = undo_page + undo->hdr_offset;
 
-  if (undo->state != TRX_UNDO_CACHED) {
+  if (undo->state != TRX_UNDO_CACHED /* 将被 purge 回收 */) {
     ulint hist_size;
 #ifdef UNIV_DEBUG
     trx_usegf_t *seg_header = undo_page + TRX_UNDO_SEG_HDR;
@@ -345,7 +345,7 @@ void trx_purge_add_update_undo_to_history(
     if (UNIV_UNLIKELY(undo->id >= TRX_RSEG_N_SLOTS)) {
       ib::fatal(UT_LOCATION_HERE, ER_IB_MSG_1165) << "undo->id is " << undo->id;
     }
-
+    // 去除链接
     trx_rsegf_set_nth_undo(rseg_header, undo->id, FIL_NULL, mtr);
 
     MONITOR_DEC(MONITOR_NUM_UNDO_SLOT_USED);
@@ -1723,10 +1723,11 @@ static void trx_purge_rseg_get_next_history_log(
 
   (*n_pages_handled)++;
 
+  // 从 history 链表中取出下一个提交的事务对应的 undo 日志
   auto prev_log_addr = trx_purge_get_log_from_hist(
       flst_get_prev_addr(log_hdr + TRX_UNDO_HISTORY_NODE, &mtr));
 
-  if (prev_log_addr.page == FIL_NULL) {
+  if (prev_log_addr.page == FIL_NULL /* 当前回滚段内日志清理完毕 */) {
     /* No logs left in the history list */
 
     rseg->last_page_no = FIL_NULL;
@@ -1766,6 +1767,7 @@ static void trx_purge_rseg_get_next_history_log(
   /* Read the trx number and del marks from the previous log header */
   mtr_start(&mtr);
 
+  /// purge 是以 undo log 为单位的，包含多个 undo record
   log_hdr =
       trx_undo_page_get_s_latched(page_id_t(rseg->space_id, prev_log_addr.page),
                                   rseg->page_size, &mtr) +
@@ -1794,6 +1796,7 @@ static void trx_purge_rseg_get_next_history_log(
 
   mutex_enter(&purge_sys->pq_mutex);
 
+  // 从 history 链表拿出的元素放入到 purge queue 里面
   purge_sys->purge_queue->push(std::move(elem));
 
   mutex_exit(&purge_sys->pq_mutex);
@@ -1860,6 +1863,7 @@ static void trx_purge_read_undo_rec(trx_purge_t *purge_sys,
 static void trx_purge_choose_next_log(void) {
   ut_ad(purge_sys->next_stored == false);
 
+  // 从 purge_queue 中选择下一个要处理 rseg
   const page_size_t &page_size = purge_sys->rseg_iter->set_next();
 
   if (purge_sys->rseg != nullptr) {
@@ -1890,6 +1894,7 @@ static trx_undo_rec_t *trx_purge_get_next_rec(
   ut_ad(purge_sys->next_stored);
   ut_ad(purge_sys->iter.trx_no < purge_sys->view.low_limit_no());
 
+  // 从 purge sys 找到本次应当搜寻的起点
   space = purge_sys->rseg->space_id;
   page_no = purge_sys->page_no;
   offset = purge_sys->offset;
@@ -1918,6 +1923,7 @@ static trx_undo_rec_t *trx_purge_get_next_rec(
 
   rec2 = rec;
 
+  // 找到整条 undo log
   for (;;) {
     ulint type;
     trx_undo_rec_t *next_rec;
@@ -1929,7 +1935,7 @@ static trx_undo_rec_t *trx_purge_get_next_rec(
     next_rec = trx_undo_page_get_next_rec(rec2, purge_sys->hdr_page_no,
                                           purge_sys->hdr_offset);
 
-    if (next_rec == nullptr) {
+    if (next_rec == nullptr /* undo log 可能跨页 */) {
       rec2 = trx_undo_get_next_rec(rec2, purge_sys->hdr_page_no,
                                    purge_sys->hdr_offset, &mtr);
       break;
@@ -1955,9 +1961,9 @@ static trx_undo_rec_t *trx_purge_get_next_rec(
     }
   }
 
-  if (rec2 == nullptr) {
+  if (rec2 == nullptr /* 当面页面中的 undo log 处理完毕 */) {
     mtr_commit(&mtr);
-
+    // rseg 中 history 头部页面已经处理完毕
     trx_purge_rseg_get_next_history_log(purge_sys->rseg, n_pages_handled);
 
     /* Look for the next undo log and record to purge */
@@ -1969,7 +1975,7 @@ static trx_undo_rec_t *trx_purge_get_next_rec(
     undo_page =
         trx_undo_page_get_s_latched(page_id_t(space, page_no), page_size, &mtr);
 
-  } else {
+  } else /* 存在下一条 undo log 或者 undo log 发生了跨页 */{
     page = page_align(rec2);
 
     purge_sys->offset = rec2 - page;
@@ -2247,6 +2253,7 @@ static ulint trx_purge_attach_undo_recs(const ulint n_purge_threads,
   /* Validate some pre-requisites and reset done flag. */
   ulint i = 0;
 
+  /// 从 0 号开始，选择 n_purge_threads 个线程进行初始化
   for (auto thr : purge_sys->query->thrs) {
     if (n_purge_threads <= i) break;
     purge_node_t *node;
@@ -2294,7 +2301,7 @@ static ulint trx_purge_attach_undo_recs(const ulint n_purge_threads,
     if (rec.undo_rec == &trx_purge_ignore_rec) {
       continue;
 
-    } else if (rec.undo_rec == nullptr) {
+    } else if (rec.undo_rec == nullptr /* 已经没有 undo record 可以 purge */) {
       break;
     }
 
@@ -2302,6 +2309,7 @@ static ulint trx_purge_attach_undo_recs(const ulint n_purge_threads,
   }
 
   purge_groups.distribute_if_needed();
+  // 将需要 purge 的 record 分配给 fork 出的 thread
   purge_groups.assign(run_thrs);
 
   ut_ad(trx_purge_check_limit());
@@ -2419,10 +2427,11 @@ ulint trx_purge(ulint n_purge_threads, /*!< in: number of purge tasks
 
   /* Submit the tasks to the work queue. */
   for (ulint i = 0; i < n_purge_threads - 1; ++i) {
+    // 这里相当于依次对 fork 出的 thread 做了初始化
     thr = que_fork_scheduler_round_robin(purge_sys->query, thr);
 
     ut_a(thr != nullptr);
-
+    // 前 n-1 个线程任务放入到队列中
     srv_que_task_enqueue_low(thr);
   }
 
@@ -2430,9 +2439,9 @@ ulint trx_purge(ulint n_purge_threads, /*!< in: number of purge tasks
   ut_a(thr != nullptr);
 
   purge_sys->n_submitted += n_purge_threads - 1;
-
+  // 最后一个任务立刻执行
   que_run_threads(thr);
-
+  // 等待队列中的任务完成执行
   trx_purge_wait_for_workers_to_complete();
 
   ut_a(purge_sys->n_submitted == purge_sys->n_completed);

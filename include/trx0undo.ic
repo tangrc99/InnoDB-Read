@@ -227,13 +227,13 @@ static inline trx_undo_rec_t *trx_undo_page_get_next_rec(
   undo_page = (page_t *)ut_align_down(rec, UNIV_PAGE_SIZE);
 
   end = trx_undo_page_get_end(undo_page, page_no, offset);
-  /// next record 在记录开始的地方
+  /// next record 在记录一个 rcord 开始的地方
   next = mach_read_from_2(rec);
   /// 判断是否还有记录
   if (next == end) {
     return (nullptr);
   }
-
+  /// 注意，这个函数返回的是同一个 undo log 内的下一个 undo record
   return (undo_page + next);
 }
 

@@ -1232,6 +1232,7 @@ static trx_rseg_t *get_next_redo_rseg_from_trx_sys() {
 We assume that the assigned slots are not contiguous and have gaps.
 @return assigned rollback segment instance */
 static trx_rseg_t *get_next_redo_rseg() {
+  // 以轮询方式 分配回滚段
   if (!trx_sys->rsegs.is_empty()) {
     return (get_next_redo_rseg_from_trx_sys());
   } else {
@@ -1392,7 +1393,8 @@ static void trx_start_low(
   if (!trx->read_only &&
       (trx->mysql_thd == nullptr || read_write || trx->ddl_operation)) {
 
-    /// 写事务需要分配一个 undo log slot
+    // 写事务需要分配一个 回滚段
+    // 旧版本中回滚段会限制并发事务数目
     trx_assign_rseg_durable(trx);
 
     /* Temporary rseg is assigned only if the transaction
@@ -1611,7 +1613,7 @@ static bool trx_write_serialisation_history(
   /* If transaction involves update then add rollback segments
   to purge queue. */
   if (trx->rsegs.m_redo.update_undo != nullptr ||
-      trx->rsegs.m_noredo.update_undo != nullptr) {
+      trx->rsegs.m_noredo.update_undo != nullptr /* 含 update 才会进入版本链表*/) {
     /* Assign the transaction serialisation number and add these
     rollback segments to purge trx-no sorted priority queue
     if this is the first UNDO log being written to assigned
@@ -2421,7 +2423,7 @@ que_thr_t *trx_commit_step(que_thr_t *thr) /*!< in: query thread */
 
     ut_a(trx->lock.wait_thr == nullptr);
     ut_a(trx->lock.que_state != TRX_QUE_LOCK_WAIT);
-    /// 检查事务状态，如果没有获取锁，则线程需要进入 SUSPEND 状态
+    // 检查事务状态，如果没有获取锁，则线程需要进入 SUSPEND 状态
     trx_commit_or_rollback_prepare(trx);
 
     trx->lock.que_state = TRX_QUE_COMMITTING;

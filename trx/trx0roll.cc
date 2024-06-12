@@ -973,7 +973,7 @@ static trx_undo_rec_t *trx_roll_pop_top_rec_of_trx_low(
   }
 
   auto is_insert = (undo == ins_undo);
-
+  // 这里的 roll_ptr 只用于确定 undo 记录的种类
   *roll_ptr = trx_undo_build_roll_ptr(is_insert, undo->rseg->space_id,
                                       undo->top_page_no, undo->top_offset);
 
@@ -1060,7 +1060,7 @@ static que_t *trx_roll_graph_build(trx_t *trx, bool partial_rollback) {
   fork->trx = trx;
 
   thr = que_thr_create(fork, heap, nullptr);
-  /// 指令为 QUE_NODE_UNDO，对应函数为 row_undo_step
+  /// rollback graph 中只有一个 node，指令为 QUE_NODE_UNDO，对应函数为 row_undo_step
   thr->child = row_undo_node_create(trx, thr, heap, partial_rollback);
 
   return (fork);

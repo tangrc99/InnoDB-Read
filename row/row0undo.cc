@@ -260,6 +260,7 @@ func_exit:
 
 
   if (node->state == UNDO_NODE_FETCH_NEXT) {
+    // 按照顺序读取 undo record 副本
     node->undo_rec = trx_roll_pop_top_rec_of_trx(trx, trx->roll_limit,
                                                  &roll_ptr, node->heap);
 
@@ -349,6 +350,7 @@ void row_convert_impl_to_expl_if_needed(btr_cur_t *cursor, undo_node_t *node) {
  @return query thread to run next or NULL */
 que_thr_t *row_undo_step(que_thr_t *thr) /*!< in: query thread */
 {
+  // undo 执行阶段的入口函数
   dberr_t err;
   undo_node_t *node;
   trx_t *trx;
@@ -362,7 +364,7 @@ que_thr_t *row_undo_step(que_thr_t *thr) /*!< in: query thread */
   node = static_cast<undo_node_t *>(thr->run_node);
 
   ut_ad(que_node_get_type(node) == QUE_NODE_UNDO);
-
+  // impl function
   err = row_undo(node, thr);
 
   trx->error_state = err;

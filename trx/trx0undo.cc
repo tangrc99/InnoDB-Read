@@ -227,15 +227,16 @@ static trx_undo_rec_t *trx_undo_get_next_rec_from_next_page(
   page_t *next_page;
   ulint next;
 
-  if (page_no == page_get_page_no(undo_page)) {
+  if (page_no == page_get_page_no(undo_page) /* 这里是第一个 undo log 的第一个 page，可能有复用 */) {
     log_hdr = undo_page + offset;
     next = mach_read_from_2(log_hdr + TRX_UNDO_NEXT_LOG);
 
-    if (next != 0) {
+    if (next != 0 /* 代表本条 undo log 后还有其他的 undo log，不可能从下页获取 record*/) {
       return (nullptr);
     }
   }
-
+  // 注意这个 undo_page 是当前 record 所在的 page；所以这里是找这个 undo log 是否跨页了
+  // 如果没有跨页就不需要继续再找了
   next_page_no = flst_get_next_addr(
                      undo_page + TRX_UNDO_PAGE_HDR + TRX_UNDO_PAGE_NODE, mtr)
                      .page;
@@ -437,6 +438,8 @@ static void trx_undo_page_init(
     return (DB_OUT_OF_FILE_SPACE);
   }
 
+  // 每一个 undo slot 对应一个 undo seg，它有自己的 header page
+  // 这个 header page 同样存储 undo 日志 (可以存多条)
   /* Allocate a new file segment for the undo log */
   block = fseg_create_general(space, 0, TRX_UNDO_SEG_HDR + TRX_UNDO_FSEG_HEADER,
                               true, mtr);
@@ -929,6 +932,8 @@ buf_block_t *trx_undo_add_page(
                               the caller must have reserved
                               the rollback segment mutex */
 {
+  // 对于大事务，slot 中的 page 数目不够用，在同一段内新加 page，
+  // 新加的 page 一页只能存储一条 log
   page_t *header_page;
   buf_block_t *new_block;
   page_t *new_page;
@@ -951,6 +956,7 @@ buf_block_t *trx_undo_add_page(
     return (nullptr);
   }
 
+  // undo page 和 undo seg 存在于同一个段
   new_block = fseg_alloc_free_page_general(
       TRX_UNDO_SEG_HDR + TRX_UNDO_FSEG_HEADER + header_page,
       undo->top_page_no + 1, FSP_UP, true, mtr, mtr);
@@ -1257,6 +1263,7 @@ static void trx_undo_seg_free(const trx_undo_t *undo, bool noredo) {
 
     auto file_seg = seg_header + TRX_UNDO_FSEG_HEADER;
 
+    // 每次释放一个区
     finished = fseg_free_step(file_seg, false, &mtr);
 
     if (finished) {
@@ -1563,10 +1570,10 @@ void trx_undo_mem_free(trx_undo_t *undo) /*!< in: the undo object to be freed */
   }
 
   rseg->incr_curr_size();
-  /// 拿到管理 undo segment 的数据页
+  // 拿到管理 undo segment header
   rseg_header =
       trx_rsegf_get(rseg->space_id, rseg->page_no, rseg->page_size, mtr);
-  /// 尝试创建 undo header page，该 page 被 rseg_header 管理
+  /// 在拿到的 slot 上创建 undo segment 和 undo first page
   auto err = trx_undo_seg_create(rseg, rseg_header, type, &id, &undo_page, mtr);
 
   if (err != DB_SUCCESS) {
@@ -1576,7 +1583,7 @@ void trx_undo_mem_free(trx_undo_t *undo) /*!< in: the undo object to be freed */
   }
 
   page_no = page_get_page_no(undo_page);
-
+  // 初始化 undo first page 物理结构
   offset = trx_undo_header_create(undo_page, trx_id, mtr);
 
   /* GTID storage is needed only for update undo log. */
@@ -1815,13 +1822,13 @@ page_t *trx_undo_set_state_at_finish(
   seg_hdr = undo_page + TRX_UNDO_SEG_HDR;
   page_hdr = undo_page + TRX_UNDO_PAGE_HDR;
 
-  if (undo->size == 1 && mach_read_from_2(page_hdr + TRX_UNDO_PAGE_FREE) <
-                             TRX_UNDO_PAGE_REUSE_LIMIT) {
+  if (undo->size == 1 /* 单页 */&& mach_read_from_2(page_hdr + TRX_UNDO_PAGE_FREE) <
+                             TRX_UNDO_PAGE_REUSE_LIMIT /* 占用小于 3/4 则 cache */) {
     state = TRX_UNDO_CACHED;
 
-  } else if (undo->type == TRX_UNDO_INSERT) {
+  } else if (undo->type == TRX_UNDO_INSERT /* 插入类型直接物理删除 */) {
     state = TRX_UNDO_TO_FREE;
-  } else {
+  } else /* 更新类型由 purge 回收 (涉及到事务版本问题) */ {
     state = TRX_UNDO_TO_PURGE;
   }
 
@@ -1933,6 +1940,7 @@ void trx_undo_update_cleanup(trx_t *trx, trx_undo_ptr_t *undo_ptr,
 
   ut_ad(mutex_own(&(rseg->mutex)));
 
+  // 提醒 purge 线程回收
   trx_purge_add_update_undo_to_history(
       trx, undo_ptr, undo_page, update_rseg_history_len, n_added_logs, mtr);
 
@@ -1984,6 +1992,8 @@ void trx_undo_insert_cleanup(trx_undo_ptr_t *undo_ptr, bool noredo) {
     rseg->unlatch();
 
     DEBUG_SYNC_C("innodb_commit_wait_for_truncate");
+    // 为了防止 undo 占用过多空间，在非缓冲区域每次释放 undo 时清空对应回滚段
+    // 由于事务已经提交它的 undo 不再被需要，并且 purge 不需要更新其 offset，所以清理是安全的
     trx_undo_seg_free(undo, noredo);
 
     rseg->latch();
