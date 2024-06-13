@@ -510,6 +510,7 @@ struct mtr_write_log_t {
 
     start_lsn = m_lsn;
 
+    // 拷贝到 log buffer
     end_lsn =
         log_buffer_write(*log_sys, block->begin(), block->used(), start_lsn);
 
@@ -541,6 +542,7 @@ struct mtr_write_log_t {
       log_buffer_set_first_record_group(*log_sys, end_lsn);
     }
 
+    // 更新 link_buffer
     log_buffer_write_completed(*log_sys, start_lsn, end_lsn);
 
     m_lsn = end_lsn;
@@ -848,11 +850,13 @@ void mtr_t::Command::execute() {
 
     write_log.m_left_to_write = len;
 
+    // 在 redo buffer 预留空间
     auto handle = log_buffer_reserve(*log_sys, len);
 
     write_log.m_handle = handle;
     write_log.m_lsn = handle.start_lsn;
 
+    // 在这里写入日志，并且推进 write tail
     m_impl->m_log.for_each_block(write_log);
 
     ut_ad(write_log.m_left_to_write == 0);
@@ -862,14 +866,17 @@ void mtr_t::Command::execute() {
 
     DEBUG_SYNC_C("mtr_redo_before_add_dirty_blocks");
 
+    // 回调到 buffer 模块，将修改的 page 加入到 buffer pool flush list
     add_dirty_blocks_to_flush_list(handle.start_lsn, handle.end_lsn);
 
-    // 日志在这里会被 sync 掉
+    // 在这里会更新 close list 的 tail，这是用于生成 check point 的
+    // 生成 check point 时，不仅要求对应的脏页已经落盘，还要求其 redo 已经写入
+    // 因为脏页可以并发插入，从其链表取出的 lsn 不一定是最小的
     log_buffer_close(*log_sys, handle);
 
     m_impl->m_mtr->m_commit_lsn = handle.end_lsn;
 
-  } else /* 未开启 redo log，只用将脏页加入 flush list */{
+  } else /* 未开启 redo log，只用将脏页加入 flush list */ {
     DEBUG_SYNC_C("mtr_noredo_before_add_dirty_blocks");
 
     add_dirty_blocks_to_flush_list(0, 0);
@@ -1235,6 +1242,7 @@ void mtr_commit_mlog_test_filling_block(log_t &log, size_t req_space_left) {
 
 void mtr_t::wait_for_flush() {
   ut_ad(commit_lsn() > 0);
+  // 等待 redo log 刷盘
   log_write_up_to(*log_sys, commit_lsn(), true);
 }
 

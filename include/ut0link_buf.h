@@ -290,7 +290,7 @@ inline void Link_buf<Position>::add_link_advance_tail(Position from,
     auto &slot = m_links[index];
 
     /* add link */
-    slot.store(to, std::memory_order_release);
+    slot.store(to, std::memory_order_release);  // 计算当前 slot 中数据存到哪了
 
     auto stop_condition = [&](Position prev_pos, Position) {
       return (prev_pos > from);

@@ -473,6 +473,7 @@ static void log_checkpoint(log_t &log) {
 
   log_sync_point("log_before_checkpoint_data_flush");
 
+  // 脏页同步到硬盘
   buf_flush_fsync();
 
   if (log_test != nullptr) {
@@ -484,7 +485,7 @@ static void log_checkpoint(log_t &log) {
   ut_a(checkpoint_lsn <= log_buffer_dirty_pages_added_up_to_lsn(log));
 
 #ifdef UNIV_DEBUG
-  if (checkpoint_lsn > log.flushed_to_disk_lsn.load()) {
+  if (checkpoint_lsn > log.flushed_to_disk_lsn.load() /* 检查 flush 线程是否过慢 */) {
     /* We need log_flusher, because we need redo flushed up
     to the oldest_lsn, and it's not been flushed yet. */
 
@@ -886,9 +887,9 @@ static bool log_should_checkpoint(log_t &log) {
   same critical section in which requirements are updated. */
 
   log_limits_mutex_enter(log);
-  oldest_lsn = log.available_for_checkpoint_lsn;
-  requested_checkpoint_lsn = log.requested_checkpoint_lsn;
-  periodical_checkpoints_enabled = log.periodical_checkpoints_enabled;
+  oldest_lsn = log.available_for_checkpoint_lsn;    // 由刷脏进度决定
+  requested_checkpoint_lsn = log.requested_checkpoint_lsn;  // 一些特殊情况，如 log 将近满、复制等
+  periodical_checkpoints_enabled = log.periodical_checkpoints_enabled; // 设置决定，周期性 check point
   log_limits_mutex_exit(log);
 
   if (oldest_lsn <= last_checkpoint_lsn) {
@@ -953,6 +954,7 @@ static void log_consider_checkpoint(log_t &log) {
   log_checkpointer_mutex_exit(log);
 
   if (log_test == nullptr) {
+    // 写入表的 metadata
     dict_persist_to_dd_table_buffer();
   }
 
@@ -1003,8 +1005,9 @@ void log_checkpointer(log_t *log_ptr) {
             log.last_checkpoint_lsn.load(std::memory_order_acquire) ||
         log_checkpoint_time_elapsed(log) >=
             log_busy_checkpoint_interval * get_srv_log_checkpoint_every()) {
+
       /* Consider flushing some dirty pages. */
-      log_consider_sync_flush(log);
+      log_consider_sync_flush(log); // 偏移量在这里会被更新
 
       log_sync_point("log_checkpointer_before_consider_checkpoint");
 
@@ -1019,6 +1022,8 @@ void log_checkpointer(log_t *log_ptr) {
       /* not satisfied. retry. */
       error = 0;
     } else {
+
+      // 阻塞一段时间 或 被唤醒
       error = os_event_wait_time_low(log.checkpointer_event,
                                      get_srv_log_checkpoint_every(), sig_count);
     }

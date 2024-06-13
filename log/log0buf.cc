@@ -544,7 +544,7 @@ static inline sn_t log_buffer_s_lock_enter_reserve(log_t &log, size_t len) {
 #endif /* UNIV_PFS_RWLOCK */
 
   /* Reserve space in sequence of data bytes: */
-  sn_t start_sn = log.sn.fetch_add(len);
+  sn_t start_sn = log.sn.fetch_add(len);  // 原子操作获取 offset
   if (UNIV_UNLIKELY((start_sn & SN_LOCKED) != 0)) {
     start_sn &= ~SN_LOCKED;
     /* log.sn is locked. Should wait for unlocked. */
@@ -741,7 +741,7 @@ static void log_wait_for_space_after_reserving(log_t &log,
 
   log_sync_point("log_wfs_after_reserving_before_buf_size_1");
 
-  if (len > log.buf_size_sn.load()) {
+  if (len > log.buf_size_sn.load() /* redo log 过长，扩充缓冲区 */) {
     DBUG_EXECUTE_IF("ib_log_buffer_is_short_crash", DBUG_SUICIDE(););
 
     log_write_up_to(log, log_translate_sn_to_lsn(start_sn), false);
@@ -875,6 +875,8 @@ Log_handle log_buffer_reserve(log_t &log, size_t len) {
 
   ut_a(len > 0);
 
+  // sn 和 lsn 不是序列号，而是日志的偏移量
+
   /* Reserve space in sequence of data bytes: */
   const sn_t start_sn = log_buffer_s_lock_enter_reserve(log, len);
 
@@ -898,7 +900,7 @@ Log_handle log_buffer_reserve(log_t &log, size_t len) {
   handle.start_lsn = log_translate_sn_to_lsn(start_sn);
   handle.end_lsn = log_translate_sn_to_lsn(end_sn);
 
-  if (unlikely(end_sn > log.buf_limit_sn.load())) {
+  if (unlikely(end_sn > log.buf_limit_sn.load()) /* redo log 已经写满 */) {
     log_wait_for_space_after_reserving(log, handle);
   }
 
@@ -920,6 +922,7 @@ Log_handle log_buffer_reserve(log_t &log, size_t len) {
 
 lsn_t log_buffer_write(log_t &log, const byte *str, size_t str_len,
                        lsn_t start_lsn) {
+  // 将对应的数据拷贝到 log buffer
   ut_ad(rw_lock_own(log.sn_lock_inst, RW_LOCK_S));
 
   ut_a(log.buf != nullptr);
@@ -1111,9 +1114,11 @@ void log_buffer_write_completed(log_t &log, lsn_t start_lsn, lsn_t end_lsn) {
       log.current_ready_waiting_lsn <= ready_lsn &&
       !os_event_is_set(log.closer_event) &&
       log_closer_mutex_enter_nowait(log) == 0) {
+
     if (log.current_ready_waiting_lsn > 0 &&
         log.current_ready_waiting_lsn <= ready_lsn &&
         !os_event_is_set(log.closer_event)) {
+
       log.current_ready_waiting_lsn = 0;
       os_event_set(log.closer_event);
     }
@@ -1185,6 +1190,7 @@ void log_buffer_set_first_record_group(log_t &log, lsn_t rec_group_end_lsn) {
   crosses boundaries of consecutive log blocks. */
   ut_a(log_block_get_first_rec_group(last_block_ptr) == 0);
 
+  // 设置 First record offset
   log_block_set_first_rec_group(last_block_ptr,
                                 rec_group_end_lsn % OS_FILE_LOG_BLOCK_SIZE);
 }
@@ -1283,15 +1289,17 @@ void log_buffer_get_last_block(log_t &log, lsn_t &last_lsn, byte *last_block,
 /** @{ */
 
 void log_advance_ready_for_write_lsn(log_t &log) {
+  // 该函数只会被 writer 线程调用
   ut_ad(log_writer_mutex_own(log));
   ut_d(log_writer_thread_active_validate());
 
   const lsn_t write_lsn = log.write_lsn.load();
 
-  const auto write_max_size = srv_log_write_max_size;
+  const auto write_max_size = srv_log_write_max_size; // 4KB
 
   ut_a(write_max_size > 0);
 
+  // 最大搜寻 4kb
   auto stop_condition = [&](lsn_t prev_lsn, lsn_t next_lsn) {
     ut_a(log_is_data_lsn(prev_lsn));
     ut_a(log_is_data_lsn(next_lsn));
@@ -1304,6 +1312,7 @@ void log_advance_ready_for_write_lsn(log_t &log) {
     return prev_lsn - write_lsn >= write_max_size;
   };
 
+  // 上次写入的 offset
   const lsn_t previous_lsn = log_buffer_ready_for_write_lsn(log);
 
   ut_a(previous_lsn >= write_lsn);

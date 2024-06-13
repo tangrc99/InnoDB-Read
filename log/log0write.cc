@@ -793,6 +793,7 @@ be used when waiting in log.flush_events (for redo flushed up to lsn).
 @param[in]  lsn  lsn up to which waiting (for log.flushed_to_disk_lsn)
 @return  index of the slot (integer in range 0 .. log.flush_events_size-1) */
 static inline size_t log_compute_flush_event_slot(const log_t &log, lsn_t lsn) {
+  // 计算出 lsn 对应的 BLOCK 位置，然后 BLOCK % event_slot_size
   return log_compute_wait_event_slot(lsn, log.flush_events_size);
 }
 
@@ -842,6 +843,7 @@ We do not care if it's flushed or not.
 @return         statistics related to waiting inside */
 static Wait_stats log_wait_for_write(const log_t &log, lsn_t lsn,
                                      bool *interrupted) {
+  // 通知 writer 线程工作
   os_event_set(log.writer_event);
 
   const uint64_t max_spins = log_max_spins_when_waiting_in_user_thread(
@@ -866,7 +868,7 @@ static Wait_stats log_wait_for_write(const log_t &log, lsn_t lsn,
     ut_d(log_background_write_threads_active_validate(log));
     return false;
   };
-
+  // 计算需要等待的槽位，由于多个 lsn 复用同一个槽位，收到槽通知时，可能会不满足条件
   const size_t slot = log_compute_write_event_slot(log, lsn);
 
   const auto wait_stats =
@@ -885,6 +887,7 @@ static Wait_stats log_wait_for_write(const log_t &log, lsn_t lsn,
 @return         statistics related to waiting inside */
 static Wait_stats log_wait_for_flush(const log_t &log, lsn_t lsn,
                                      bool *interrupted) {
+  // 通知 writer 或 flush 线程开始工作
   if (log.write_lsn.load(std::memory_order_relaxed) < lsn) {
     os_event_set(log.writer_event);
   }
@@ -1082,6 +1085,7 @@ static Wait_stats log_self_write_up_to(log_t &log, lsn_t end_lsn,
 }
 
 Wait_stats log_write_up_to(log_t &log, lsn_t end_lsn, bool flush_to_disk) {
+  // 函数的作用是等待 log 写入/刷盘到指定的 lsn
   ut_a(!srv_read_only_mode);
 
   /* If we were updating log.flushed_to_disk_lsn while parsing redo log
@@ -1152,7 +1156,7 @@ retry:
       return wait_stats;
     }
 
-    if (srv_flush_log_at_trx_commit != 1) {
+    if (srv_flush_log_at_trx_commit != 1 /* 以 1s 速度刷盘，不等待 flush */) {
       /* We need redo flushed, but because trx != 1, we have
       disabled notifications sent from log_writer to log_flusher.
 
@@ -1238,7 +1242,8 @@ struct Log_thread_waiting {
         m_log.write_to_file_requests_interval.load(std::memory_order_relaxed);
 
     if (srv_cpu_usage.utime_abs < srv_log_spin_cpu_abs_lwm ||
-        !log_write_to_file_requests_are_frequent(req_interval)) {
+        !log_write_to_file_requests_are_frequent(req_interval)
+        /* 当 CPU 占用率较高 或者 log 写入频繁时，才尝试自旋 1ms 来避免线程调度 */) {
       /* Either:
       1. CPU usage is very low on the server, which means the server is most
          likely idle or almost idle.
@@ -1251,7 +1256,7 @@ struct Log_thread_waiting {
       min_timeout = std::min<std::chrono::microseconds>(
           req_interval, std::chrono::milliseconds{1});
     }
-
+    // 自旋 1ms 后，进入阻塞等待 stop_condition 达成
     const auto wait_stats =
         os_event_wait_for(m_event, spin_delay, min_timeout, stop_condition);
 
@@ -1421,14 +1426,14 @@ static inline size_t compute_how_much_to_write(const log_t &log,
   loop of the log writer thread. Then, the log writer will update
   maximum lsn up to which, it has data ready in the log buffer,
   and request next write operation according to its strategy. */
-  if (!current_file_has_space(log, real_offset, buffer_size)) {
+  if (!current_file_has_space(log, real_offset, buffer_size) /* 当前文件无法完整写入整条 log */) {
     /* The end of write would not fit the current log file. */
 
     /* But the beginning is guaranteed to fit or to be placed
     at the first byte of the next file. */
     ut_a(current_file_has_space(log, real_offset, 0));
 
-    if (!current_file_has_space(log, real_offset, 1)) {
+    if (!current_file_has_space(log, real_offset, 1) /* 无法写入 redo 的首字节 type */) {
       /* The beginning of write is at the first byte
       of the next log file. Flush header of the next
       log file, advance current log file to the next,
@@ -1436,7 +1441,7 @@ static inline size_t compute_how_much_to_write(const log_t &log,
       write_from_log_buffer = false;
       return 0;
 
-    } else {
+    } else /* 能够写入一部分 redo, 跨 block 写入 */ {
       /* We write across at least two consecutive log files.
       Limit current write to the first one and then retry for
       next_file. */
@@ -1451,7 +1456,7 @@ static inline size_t compute_how_much_to_write(const log_t &log,
       ut_a(write_size % OS_FILE_LOG_BLOCK_SIZE == 0);
     }
 
-  } else {
+  } else /* 能够完整写入 log */{
     write_size = buffer_size;
 
     ut_a(write_size % OS_FILE_LOG_BLOCK_SIZE >= LOG_BLOCK_HDR_SIZE ||
@@ -1481,14 +1486,16 @@ static inline size_t compute_how_much_to_write(const log_t &log,
   }
 
   /* Check how much we have written ahead to avoid read-on-write. */
-
-  if (!current_write_ahead_enough(log, real_offset, write_size)) {
-    if (!current_write_ahead_enough(log, real_offset, 1)) {
+  // 因为硬盘中文件以 4kb 扇区对齐，所以当 append 写入一个小于 4kb 大小的数据时，需要从文件中
+  // 将之前的数据读出来，然后才能 append 之后的数据
+  // 如果一次写入一个补零位 4kb 的数据，这部分会被 cache 在系统中，下一次这部分写入就不需要读取
+  if (!current_write_ahead_enough(log, real_offset, write_size) /* 写入整条 log 时跨 4kb */ ) {
+    if (!current_write_ahead_enough(log, real_offset, 1) /* 写入 log 首字节跨 4kb */) {
       /* Current write-ahead region has no space at all. */
-
+      // 下一次补零能够到达的区域
       const auto next_wa = compute_next_write_ahead_end(real_offset);
 
-      if (!write_ahead_enough(next_wa, real_offset, write_size)) {
+      if (!write_ahead_enough(next_wa, real_offset, write_size) /* 补零后还不够写整条 */) {
         /* ... and also the next write-ahead is too small.
         Therefore we have more data to write than size of
         the write-ahead. We write from the log buffer,
@@ -1497,7 +1504,7 @@ static inline size_t compute_how_much_to_write(const log_t &log,
 
         ut_a(write_from_log_buffer);
 
-        write_size = next_wa - real_offset;
+        write_size = next_wa - real_offset; // 写到下一次补零能够到达的区域
 
         ut_a((real_offset + write_size) % srv_log_write_ahead_size == 0);
 
@@ -1521,7 +1528,7 @@ static inline size_t compute_how_much_to_write(const log_t &log,
     }
 
   } else {
-    if (write_from_log_buffer) {
+    if (write_from_log_buffer /* 写入大于一个 BLOCK 时，只能写入整数个 BLOCK */) {
       write_size = ut_uint64_align_down(write_size, OS_FILE_LOG_BLOCK_SIZE);
     }
   }
@@ -1555,6 +1562,7 @@ static inline void prepare_full_blocks(const log_t &log, byte *buffer,
     const lsn_t block_lsn = start_lsn + buffer_offset;
 
     Log_data_block_header block_header;
+    // 更新 block header 内容
     block_header.set_lsn(block_lsn);
     block_header.m_data_len = OS_FILE_LOG_BLOCK_SIZE;
     block_header.m_first_rec_group = log_block_get_first_rec_group(ptr);
@@ -1564,12 +1572,14 @@ static inline void prepare_full_blocks(const log_t &log, byte *buffer,
 
 static inline dberr_t write_blocks(log_t &log, byte *write_buf,
                                    size_t write_size, os_offset_t real_offset) {
+  // 确保每次写入都是对齐 512 字节的
   ut_a(write_size >= OS_FILE_LOG_BLOCK_SIZE);
   ut_a(write_size % OS_FILE_LOG_BLOCK_SIZE == 0);
   ut_a(real_offset / UNIV_PAGE_SIZE <= PAGE_NO_MAX);
 
   ut_a(log.write_ahead_end_offset % srv_log_write_ahead_size == 0);
 
+  // 确保写入范围在当前 write ahead 内，或者写入尾端对齐 4kb
   ut_a(real_offset + write_size <= log.write_ahead_end_offset ||
        (real_offset + write_size) % srv_log_write_ahead_size == 0);
 
@@ -1598,10 +1608,10 @@ static inline void notify_about_advanced_write_lsn(log_t &log,
 
     const auto last_slot = log_compute_write_event_slot(log, new_write_lsn);
 
-    if (first_slot == last_slot) {
+    if (first_slot == last_slot /* 通知一个槽 */) {
       log_sync_point("log_write_before_users_notify");
       os_event_set(log.write_events[first_slot]);
-    } else {
+    } else /* 其他线程通知多个槽 */ {
       log_sync_point("log_write_before_notifier_notify");
       os_event_set(log.write_notifier_event);
     }
@@ -1726,24 +1736,26 @@ static dberr_t log_write_buffer(log_t &log, byte *buffer, size_t buffer_size,
 
   validate_start_lsn(log, start_lsn, buffer_size);
 
+  // offset = lsn - block_start lsn
   const auto real_offset = log.m_current_file.offset(start_lsn);
 
   bool write_from_log_buffer;
 
+  // 计算在当前文件中需要写入多少字节
   auto write_size = compute_how_much_to_write(log, real_offset, buffer_size,
                                               write_from_log_buffer);
 
   if (write_size == 0) {
     return start_next_file(log, start_lsn);
   }
-
+  // 在 block header 中填充内容
   prepare_full_blocks(log, buffer, write_size, start_lsn);
 
   byte *write_buf;
   os_offset_t written_ahead = 0;
   lsn_t lsn_advance = write_size;
 
-  if (write_from_log_buffer) {
+  if (write_from_log_buffer) /* 直接写入 */{
     /* We have at least one completed log block to write.
     We write completed blocks from the log buffer. Note,
     that possibly we do not write all completed blocks,
@@ -1757,7 +1769,7 @@ static dberr_t log_write_buffer(log_t &log, byte *buffer, size_t buffer_size,
 
     log_sync_point("log_writer_before_write_from_log_buffer");
 
-  } else {
+  } else /* 从 write ahead buffer 写入 */{
     DBUG_PRINT("ib_log",
                ("incomplete write start_lsn=" LSN_PF " write_lsn=" LSN_PF
                 " -> " LSN_PF,
@@ -1777,7 +1789,8 @@ static dberr_t log_write_buffer(log_t &log, byte *buffer, size_t buffer_size,
     where we first need to copy the data. */
     copy_to_write_ahead_buffer(log, buffer, write_size, start_lsn);
 
-    if (!current_write_ahead_enough(log, real_offset, 1)) {
+    if (!current_write_ahead_enough(log, real_offset, 1) /* write ahead 已写满，扩充 */) {
+      // write_size 是当前文件中写的字节数目
       written_ahead = prepare_for_write_ahead(log, real_offset, write_size);
     }
   }
@@ -1793,6 +1806,7 @@ static dberr_t log_write_buffer(log_t &log, byte *buffer, size_t buffer_size,
 
   log_sync_point("log_writer_before_lsn_update");
 
+  // 更新写入的标识位
   const lsn_t old_write_lsn = log.write_lsn.load();
 
   const lsn_t new_write_lsn = start_lsn + lsn_advance;
@@ -1800,6 +1814,7 @@ static dberr_t log_write_buffer(log_t &log, byte *buffer, size_t buffer_size,
 
   log.write_lsn.store(new_write_lsn);
 
+  // 更新事件槽，唤醒其他线程
   notify_about_advanced_write_lsn(log, old_write_lsn, new_write_lsn);
 
   log_sync_point("log_writer_before_buf_limit_update");
@@ -1854,7 +1869,7 @@ static inline bool log_writer_extra_margin_check(log_t &log,
                                                  lsn_t checkpoint_lsn,
                                                  lsn_t next_write_lsn) {
   ut_ad(log_writer_mutex_own(log));
-
+  // 95% 的文件容量，有 5% 作为 extra margin
   const lsn_t soft_limited_lsn =
       ut_uint64_align_down(checkpoint_lsn, OS_FILE_LOG_BLOCK_SIZE) +
       log.m_capacity.soft_logical_capacity();
@@ -1866,6 +1881,7 @@ static inline bool log_writer_extra_margin_check(log_t &log,
     return false;
   } else {
     if (!log.m_writer_inside_extra_margin) {
+      // 进入警告状态，让用户线程调用 log_free_check() 时进入等待状态
       log_writer_enter_extra_margin(log);
     }
     return true;
@@ -1904,7 +1920,7 @@ static inline std::pair<lsn_t, bool> log_writer_wait_on_checkpoint_optimistic(
   ut_a(last_write_lsn <= hard_limited_lsn);
   ut_a(checkpoint_lsn < next_write_lsn);
 
-  return {hard_limited_lsn,
+  return {hard_limited_lsn, /* 需要留下 5% 的大小 */
           !log_writer_extra_margin_check(log, checkpoint_lsn, next_write_lsn)};
 }
 
@@ -1929,6 +1945,7 @@ static lsn_t log_writer_wait_on_checkpoint_pessimistic(log_t &log,
       return hard_limited_lsn;
     }
 
+    // log 将近写满，通知 check point 线程工作
     os_event_set(log.checkpointer_event);
 
     if (last_write_lsn + OS_FILE_LOG_BLOCK_SIZE <= hard_limited_lsn) {
@@ -2133,6 +2150,7 @@ static void log_writer_write_buffer(log_t &log, lsn_t next_write_lsn) {
   ut_a(next_write_lsn - last_write_lsn <= log.buf_size);
   ut_a(next_write_lsn > last_write_lsn);
 
+  // 计算 ring_buffer offset
   size_t start_offset = last_write_lsn % log.buf_size;
   size_t end_offset = next_write_lsn % log.buf_size;
 
@@ -2149,6 +2167,9 @@ static void log_writer_write_buffer(log_t &log, lsn_t next_write_lsn) {
 
   /* Wait until there is free space in log files.*/
 
+  // redo log 文件是重复利用的，next_write_lsn - check point < LOG_SPACE_SIZE 才能写入
+  // check point 是脏页落盘的 lsn
+  // 如果 log 已经进入 margin 区域，这里会禁止写入
   const lsn_t checkpoint_limited_lsn =
       log_writer_wait_on_checkpoint(log, last_write_lsn, next_write_lsn);
 
@@ -2158,6 +2179,7 @@ static void log_writer_write_buffer(log_t &log, lsn_t next_write_lsn) {
   log_sync_point("log_writer_after_checkpoint_check");
 
   if (arch_log_sys != nullptr) {
+    // 等待 log 归档，归档的速度较快，所以这里先检查
     log_writer_wait_on_archiver(log, next_write_lsn);
   }
 
@@ -2179,19 +2201,21 @@ static void log_writer_write_buffer(log_t &log, lsn_t next_write_lsn) {
          next_write_lsn % OS_FILE_LOG_BLOCK_SIZE == 0);
   }
 
+  // 等待其他 consumer，如 MEB 备份
   log_writer_wait_on_consumers(log, next_write_lsn);
   ut_ad(log_writer_mutex_own(log));
 
   DBUG_PRINT("ib_log",
              ("write " LSN_PF " to " LSN_PF, last_write_lsn, next_write_lsn));
 
+  // 写入的起点和终点位置都对齐到了 BLOCK_SIZE
   byte *buf_begin =
       log.buf + ut_uint64_align_down(start_offset, OS_FILE_LOG_BLOCK_SIZE);
-
   byte *buf_end = log.buf + end_offset;
 
   /* Do the write to the log files */
 
+  // 逻辑写，针对所有的文件
   const dberr_t err = log_write_buffer(
       log, buf_begin, buf_end - buf_begin,
       ut_uint64_align_down(last_write_lsn, OS_FILE_LOG_BLOCK_SIZE));
@@ -2221,6 +2245,7 @@ static bool log_writer_is_allowed_to_stop(log_t &log) {
 }
 
 void log_writer(log_t *log_ptr) {
+  // log writer 线程运行函数
   ut_a(log_ptr != nullptr);
 
   log_t &log = *log_ptr;
@@ -2246,8 +2271,9 @@ void log_writer(log_t *log_ptr) {
       }
 
       /* Advance lsn up to which data is ready in log buffer. */
-      log_advance_ready_for_write_lsn(log);
+      log_advance_ready_for_write_lsn(log); // 检查 link buffer 连续性
 
+      // 拿到更新后的 tail
       ready_lsn = log_buffer_ready_for_write_lsn(log);
 
       /* Wait until any of following conditions holds:
@@ -2278,7 +2304,7 @@ void log_writer(log_t *log_ptr) {
 
     if (UNIV_UNLIKELY(
             log.writer_threads_paused.load(std::memory_order_acquire) &&
-            !log.should_stop_threads.load())) {
+            !log.should_stop_threads.load()) /* 线程停止 */) {
       log_writer_mutex_exit(log);
 
       os_event_wait(log.writer_threads_resume_event);
@@ -2288,7 +2314,7 @@ void log_writer(log_t *log_ptr) {
     }
 
     /* Do the actual work. */
-    if (log.write_lsn.load() < ready_lsn) {
+    if (log.write_lsn.load() < ready_lsn /* data to write */) {
       log_writer_write_buffer(log, ready_lsn);
 
       if (step % 1024 == 0) {
@@ -2467,10 +2493,10 @@ static void log_flush_low(log_t &log) {
 
     const auto last_slot = log_compute_flush_event_slot(log, flush_up_to_lsn);
 
-    if (first_slot == last_slot) {
+    if (first_slot == last_slot /* 只用通知一个槽内的事件 */) {
       log_sync_point("log_flush_before_users_notify");
       os_event_set(log.flush_events[first_slot]);
-    } else {
+    } else /* 需要通知多个槽内的事件，flush thread 会依次设置通知 */{
       log_sync_point("log_flush_before_notifier_notify");
       os_event_set(log.flush_notifier_event);
     }
@@ -2527,7 +2553,7 @@ void log_flusher(log_t *log_ptr) {
       const lsn_t last_flush_lsn = log.flushed_to_disk_lsn.load();
 
       ut_a(last_flush_lsn <= log.write_lsn.load());
-
+      // 检查是否有 redo log 可以刷盘
       if (last_flush_lsn < log.write_lsn.load()) {
         /* Flush and stop waiting. */
         log_flush_low(log);
@@ -2623,6 +2649,7 @@ void log_flusher(log_t *log_ptr) {
 /** @{ */
 
 void log_write_notifier(log_t *log_ptr) {
+  // write notifier 线程只会被周期性唤醒
   ut_a(log_ptr != nullptr);
 
   log_t &log = *log_ptr;
@@ -2675,6 +2702,7 @@ void log_write_notifier(log_t *log_ptr) {
 
       log_sync_point("log_write_notifier_before_check");
 
+      // 等待 write_lsn 更新
       if (log.write_lsn.load() >= lsn) {
         return true;
       }
@@ -2710,6 +2738,7 @@ void log_write_notifier(log_t *log_ptr) {
     const lsn_t notified_up_to_lsn =
         ut_uint64_align_up(write_lsn, OS_FILE_LOG_BLOCK_SIZE);
 
+    // 通知 log writer 线程
     while (lsn <= notified_up_to_lsn) {
       const auto slot = log_compute_write_event_slot(log, lsn);
 
@@ -2797,6 +2826,7 @@ void log_flush_notifier(log_t *log_ptr) {
 
       log_sync_point("log_flush_notifier_before_check");
 
+      // 等待 flush 计数更新
       if (log.flushed_to_disk_lsn.load() >= lsn) {
         return true;
       }
@@ -2831,7 +2861,7 @@ void log_flush_notifier(log_t *log_ptr) {
 
     const lsn_t notified_up_to_lsn =
         ut_uint64_align_up(flush_lsn, OS_FILE_LOG_BLOCK_SIZE);
-
+    // 从上次通知位置开始，依次将所有槽设置通知
     while (lsn <= notified_up_to_lsn) {
       const auto slot = log_compute_flush_event_slot(log, lsn);
 
