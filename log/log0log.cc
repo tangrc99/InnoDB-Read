@@ -657,12 +657,12 @@ static void log_sys_create() {
 #endif /* UNIV_DEBUG */
 
   /* Allocate buffers. */
-  log_allocate_buffer(log);
-  log_allocate_write_ahead_buffer(log);
-  log_allocate_recent_written(log);
-  log_allocate_recent_closed(log);
-  log_allocate_flush_events(log);
-  log_allocate_write_events(log);
+  log_allocate_buffer(log);               // 日志缓冲区
+  log_allocate_write_ahead_buffer(log);   // 预写缓冲区
+  log_allocate_recent_written(log);       // 处理写入空洞
+  log_allocate_recent_closed(log);        // 处理 CheckPoint 空洞
+  log_allocate_flush_events(log);         // flush 回调通知
+  log_allocate_write_events(log);         // write 回调通知
 
   log_reset_encryption_buffer(log);
 
@@ -1655,6 +1655,7 @@ dberr_t log_sys_init(bool expect_no_files, lsn_t flushed_lsn,
 
   new_files_lsn = 0;
 
+  // 检查是否有8.0.3版本前的 redo
   Log_files_context log_files_ctx{srv_log_group_home_dir,
                                   Log_files_ruleset::PRE_8_0_30};
 
@@ -1709,7 +1710,9 @@ dberr_t log_sys_init(bool expect_no_files, lsn_t flushed_lsn,
        srv_unix_file_flush_method == SRV_UNIX_NOSYNC);
 #endif /* !_WIN32 */
 
-  if (!found_files_in_root) {
+  if (!found_files_in_root /* 不存在旧格式文件 */) {
+
+    // 寻找新格式文件
     log_files_ctx =
         Log_files_context{srv_log_group_home_dir, Log_files_ruleset::CURRENT};
 
@@ -1830,6 +1833,7 @@ dberr_t log_sys_init(bool expect_no_files, lsn_t flushed_lsn,
     ut_a(log.m_files_ctx.m_files_ruleset == Log_files_ruleset::CURRENT);
 
     new_files_lsn = flushed_lsn;
+    // 创建新文件
     return log_files_create(log, flushed_lsn);
   }
 
@@ -1845,9 +1849,11 @@ dberr_t log_sys_init(bool expect_no_files, lsn_t flushed_lsn,
 
   ut_a(srv_force_recovery < SRV_FORCE_NO_LOG_REDO);
 
+  // 寻找日志文件并检查格式
   auto res = log_files_find_and_analyze(
       srv_read_only_mode, log.m_encryption_metadata, files, format,
       creator_name, log_flags, log_uuid);
+
   switch (res) {
     case Log_files_find_result::FOUND_VALID_FILES:
       log.m_format = format;
