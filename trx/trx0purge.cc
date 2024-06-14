@@ -255,6 +255,7 @@ void trx_purge_sys_initialize(uint32_t n_purge_threads,
   purge_sys->trx->op_info = "purge trx";
   purge_sys->trx->purge_sys_trx = true;
 
+  // 在 purge 系统初始化的时候就构建 查询图
   purge_sys->query = trx_purge_graph_build(purge_sys->trx, n_purge_threads);
 
   new (&purge_sys->view) ReadView();
@@ -2439,7 +2440,7 @@ ulint trx_purge(ulint n_purge_threads, /*!< in: number of purge tasks
   ut_a(thr != nullptr);
 
   purge_sys->n_submitted += n_purge_threads - 1;
-  // 最后一个任务立刻执行
+  // thr 中的 run_node 类型是 QUE_NODE_PURGE
   que_run_threads(thr);
   // 等待队列中的任务完成执行
   trx_purge_wait_for_workers_to_complete();

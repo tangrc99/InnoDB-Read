@@ -2394,6 +2394,7 @@ commit_node_t *trx_commit_node_create(
   commit_node_t *node;
 
   node = static_cast<commit_node_t *>(mem_heap_alloc(heap, sizeof(*node)));
+  // QUE_NODE_COMMIT 类型执行的是 trx_commit_step
   node->common.type = QUE_NODE_COMMIT;
   node->state = COMMIT_NODE_SEND;
 

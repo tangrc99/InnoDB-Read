@@ -540,7 +540,7 @@ static que_thr_t *que_thr_node_step(
                     be the thread node itself */
 {
   ut_ad(thr->run_node == thr);
-  // 刚刚执行完控制语句，执行其内容
+  // 刚刚执行完 FORK 控制语句
   if (thr->prev_node == thr->common.parent) {
     /* If control to the node came from above, it is just passed
     on */
@@ -913,15 +913,17 @@ static inline que_thr_t *que_thr_step(que_thr_t *thr) /*!< in: query thread */
     thr = que_thr_node_step(thr);
   } else if (type == QUE_NODE_COMMIT) {
     thr = trx_commit_step(thr);
-  } else if (type == QUE_NODE_UNDO) {
+  } else if (type == QUE_NODE_UNDO /* 回滚执行阶段 */) {
+    // 重复将 run_node 设置为 QUE_NODE_UNDO 直到结束
     thr = row_undo_step(thr);
-  } else if (type == QUE_NODE_PURGE) {
+  } else if (type == QUE_NODE_PURGE /* undo purge 执行阶段 */) {
     thr = row_purge_step(thr);
   } else if (type == QUE_NODE_RETURN) {
     thr = return_step(thr);
   } else if (type == QUE_NODE_EXIT) {
     thr = exit_step(thr);
-  } else if (type == QUE_NODE_ROLLBACK) {
+  } else if (type == QUE_NODE_ROLLBACK /* 回滚准备阶段 */) {
+    // 将事务置于准备状态，返回 QUE_NODE_THR 并 fork 出 QUE_NODE_UNDO
     thr = trx_rollback_step(thr);
   } else {
     ut_error;
@@ -967,7 +969,7 @@ static void que_run_threads_low(que_thr_t *thr) /*!< in: query thread */
     may change if, e.g., a subprocedure call is made */
 
     /*-------------------------*/
-    next_thr = que_thr_step(thr);
+    next_thr = que_thr_step(thr); // 根据 run_node type 来运行不同函数
     /*-------------------------*/
 
     trx_mutex_enter(trx);

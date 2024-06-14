@@ -87,6 +87,7 @@ static void trx_rollback_to_savepoint_low(
 
   heap = mem_heap_create(512, UT_LOCATION_HERE);
 
+  // roll_node 的命令为 QUE_NODE_ROLLBACK
   roll_node = roll_node_create(heap);
 
   if (savept != nullptr /* roll to savepoint*/) {
@@ -103,7 +104,7 @@ static void trx_rollback_to_savepoint_low(
   if (trx_is_rseg_updated(trx)) {
     ut_ad(trx->rsegs.m_redo.rseg != nullptr ||
           trx->rsegs.m_noredo.rseg != nullptr);
-    /// 这里会编译出相应的执行计划，step 为 QUE_NODE_ROLLBACK 并最终调用 trx_rollback_step 函数
+    /// 创建 thread_node, 其 child 为 roll_node
     thr = pars_complete_graph_for_exec(roll_node, trx, heap, nullptr);
 
     ut_a(thr == que_fork_start_command(

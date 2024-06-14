@@ -85,7 +85,7 @@ purge_node_t *row_purge_node_create(que_thr_t *parent, mem_heap_t *heap) {
   purge_node_t *node;
 
   node = static_cast<purge_node_t *>(mem_heap_zalloc(heap, sizeof(*node)));
-
+  // QUE_NODE_PURGE 类型执行函数 row_purge_step
   node->common.type = QUE_NODE_PURGE;
   node->common.parent = parent;
   node->done = true;
