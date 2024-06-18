@@ -6,6 +6,10 @@ Finished:
 2. mini transaction
 3. btree
 4. MVCC structrue
+5. redo log
 
 In progress:
 1. undo log, mvcc read and purge
+2. ddl
+3. service
+4. handler
